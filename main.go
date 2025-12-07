@@ -31,6 +31,15 @@ const (
 	STATE_COMMITTED
 )
 
+// --- TELEKOMÜNİKASYON FİZİK SABİTLERİ ---
+const (
+	TxPowerWatts     = 40.0  // 46 dBm
+	NoiseWatts       = 1e-13 // -100 dBm (Biraz daha hassas)
+	BandwidthHz      = 20e6  // 20 MHz
+	ReferenceLoss    = 1e-4  // Sinyalin ilk metresindeki kayıp (-40dB)
+	PathLossExponent = 3.0   // Şehir içi ortam için sönümleme katsayısı
+)
+
 type Message struct {
 	Sender_ID Agent_ID
 	Type      MessageType
@@ -39,20 +48,19 @@ type Message struct {
 }
 
 type BaseStation struct {
-	ID        Agent_ID
-	X, Y      float64 // Şimdilik konum ve mesafe hesabı için
-	Neighbros []Agent_ID
-	Inbox     chan Message
-	Outbox    map[Agent_ID]chan Message
-	Isactive  bool // Aktiflik Kontorlu için
-
-	//-----------
-	State       AgentState       //Şu an Ne yapıyor
-	CurrentPRB  PRB              //Kazandığı Renk
-	ProposedPRB PRB              //İstegiği renk
-	NeighborMap map[Agent_ID]PRB // Komşuların renklerini tuttuğu hafıza
-
-	Mutex sync.Mutex
+	ID              Agent_ID
+	X, Y            float64              // Şimdilik konum ve mesafe hesabı için
+	NeighborWeights map[Agent_ID]float64 // Ağırlıklı Girişim Grafiği
+	Inbox           chan Message
+	Outbox          map[Agent_ID]chan Message
+	Neighbros       []Agent_ID
+	Isactive        bool
+	State           AgentState       //Şu an Ne yapıyor
+	CurrentPRB      PRB              //Kazandığı Renk
+	ProposedPRB     PRB              //İstegiği renk
+	NeighborMap     map[Agent_ID]PRB // Komşuların renklerini tuttuğu hafıza
+	Throughput      float64          // Mbps cinsinden veri hızı
+	Mutex           sync.Mutex
 }
 
 //GLOBAL DÜNYA ORTMAI YAZICAĞUIZ
@@ -76,6 +84,8 @@ func NewBaseStation(id Agent_ID, x, y float64) *BaseStation {
 		State:       STATE_SENSING,
 		NeighborMap: make(map[Agent_ID]PRB),
 		ProposedPRB: -1,
+
+		NeighborWeights: make(map[Agent_ID]float64), // Haritayı başlatmak için
 	}
 }
 
@@ -111,57 +121,76 @@ func (bs *BaseStation) Think() {
 
 	switch bs.State {
 	case STATE_SENSING:
-		// Algoritmayı başlat
 		bs.State = STATE_PROPOSING
 
 	case STATE_PROPOSING:
-		candidate := PRB(0)
-		for {
-			isTaken := false
-			for _, usedColor := range bs.NeighborMap {
-				if usedColor == candidate {
-					isTaken = true
-					break
-				}
-			}
+		// ESKİ: for loop ile boş renk arama
+		// YENİ: Utility Maximization (Best Response)
+		bestPick := bs.CalculateBestResponse()
 
-			// Eğer hiçbir komşuda bu renk yoksa, bulduk demektir
-			if !isTaken {
-				break
-			}
+		bs.ProposedPRB = bestPick
+		fmt.Printf("[BS-%d] Utility Maximize Edildi -> Selected Colour: %d\n", bs.ID, bestPick)
 
-			candidate++
-		}
-
-		// Teklif Kısmı
-		bs.ProposedPRB = candidate
-		fmt.Printf("[BS-%d] Proposing Color %d...\n", bs.ID, candidate)
-		bs.Broadcast(MSG_PROPOSE, "I Want this Color", candidate)
-
-		// Bekleme Moduna Geç
+		bs.Broadcast(MSG_PROPOSE, "Utility based proposal", bestPick)
 		bs.State = STATE_WAITING
 
-		// Asenkron olarak sonucu kontrol et (timeout süresi kadar bekle)
+		// Timeout (Backoff) logic aynı kalabilir...
 		go func(proposed PRB) {
 			time.Sleep(2 * time.Second)
-
 			bs.Mutex.Lock()
 			defer bs.Mutex.Unlock()
+			// Eğer hala aynı teklifteysek ve girişim (Conflict) mesajı gelmediyse kazanmışızdır
 			if bs.State == STATE_WAITING && bs.ProposedPRB == proposed {
 				bs.State = STATE_COMMITTED
 				bs.CurrentPRB = proposed
-				fmt.Printf(" [BS-%d] SUCCESS! Committed to PRB-%d.\n", bs.ID, bs.CurrentPRB)
-				bs.Broadcast(MSG_SUCCESS, "I took the color", bs.CurrentPRB)
+				// Nash Dengesi: Durumumu değiştirmek için bir sebebim kalmadı.
+				fmt.Printf(" [BS-%d] NASH EQUILIBRIUM REACHED -> Color %d\n", bs.ID, bs.CurrentPRB)
+				bs.Broadcast(MSG_SUCCESS, "Commit", bs.CurrentPRB)
 			}
-		}(candidate)
+		}(bestPick)
 
-	case STATE_WAITING:
-		// Pasif bekleme modu, bir şey yapma.
-
-	case STATE_COMMITTED:
-		// Zaten rengi aldım, keyfine bak.
-
+		// Diğer case'ler (WAITING, COMMITTED) aynı kalabilir ...
 	}
+}
+
+// Oyun Teorisi Mateatiği
+
+// Şöyle çalışır:
+// Ajan bakar: "5 rengin hepsi komşularımda var, tamamen boş renk yok."
+// Hesap yapar: "Tamam, boş yer yok ama en az zararı hangisi verir?"
+// Karar verir: "A cihazı (Color 1) çok yakında, onla aynı frekansı kullanırsam sinyalim ölür.
+// Ama Cihaz B (Color 2) bana biraz uzak.
+// Mecburen Color 2'yi seçip biraz gürültüye razı olacağım."
+// Bu kısımda bunu çözen f(CalculateBestResponse) dur
+
+func (bs *BaseStation) CalculateBestResponse() PRB {
+
+	const MaxColors = 5
+
+	bestColor := PRB(-1)
+	minInterference := math.MaxFloat64
+
+	// Her olası rengi (stratejiyi) dene
+	for c := PRB(0); c < MaxColors; c++ {
+		currentInterference := 0.0
+
+		// Bu rengi seçersem komşulardan ne kadar "ceza" yerim?
+		// Formül: Toplam (Ceza * Ağırlık)
+		for neighborID, neighborColor := range bs.NeighborMap {
+			if neighborColor == c {
+				// Eğer komşum da bu rengi kullanıyorsa, aramızdaki ağırlık kadar ceza ekle
+				weight := bs.NeighborWeights[neighborID]
+				currentInterference += weight
+			}
+		}
+
+		// En düşük girişimi sağlayan rengi seç
+		if currentInterference < minInterference {
+			minInterference = currentInterference
+			bestColor = c
+		}
+	}
+	return bestColor
 }
 
 func (bs *BaseStation) HandleMessage(msg Message) {
@@ -174,6 +203,7 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 	case MSG_SUCCESS:
 		bs.NeighborMap[msg.Sender_ID] = msg.Value
 	case MSG_PROPOSE:
+
 		//Çakışma Kontorlu
 		if bs.State == STATE_COMMITTED && bs.CurrentPRB == msg.Value {
 			bs.Send(msg.Sender_ID, MSG_CONFLICT, "That colourful!", bs.CurrentPRB)
@@ -181,7 +211,7 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 		}
 		if bs.State == STATE_WAITING && bs.ProposedPRB == msg.Value {
 			if bs.ID > msg.Sender_ID {
-				fmt.Printf("⚔️ [BS-%d] Conflict! BS-%d'is rejecting (ID Priority).\n", bs.ID, msg.Sender_ID)
+				fmt.Printf("⚔ [BS-%d] Conflict! BS-%d'is rejecting (ID Priority).\n", bs.ID, msg.Sender_ID)
 				bs.Send(msg.Sender_ID, MSG_CONFLICT, "Wait your turn", bs.CurrentPRB)
 			}
 		}
@@ -221,12 +251,188 @@ func Distance(a, b *BaseStation) float64 { //MESAFE HESABI
 	return math.Sqrt(math.Pow(a.X-b.X, 2) + math.Pow(a.Y-b.Y, 2))
 }
 
+//  Jain's Fairness Index Fonksiyonu
+// Formül: (Toplam x)^2 / (n * Toplam x^2)
+
+func CalculateJainsFairness(network []*BaseStation) float64 {
+	var sumThroughput float64
+	var sumSquareThroughput float64
+	n := float64(len(network))
+
+	for _, bs := range network {
+		xi := bs.Throughput
+		sumThroughput += xi
+		sumSquareThroughput += (xi * xi)
+	}
+
+	if sumSquareThroughput == 0 {
+		return 0
+	}
+
+	jainsIndex := (sumThroughput * sumThroughput) / (n * sumSquareThroughput)
+	return jainsIndex
+}
+
+// GLOBAL AMAÇ FONKSİYONU (Total Network Interference)
+// Tüm ağdaki toplam çatışma maliyetini hesaplar.
+// Hedef: Bu değerin simülasyon sonunda azalmış olmasıdır.
+
+func CalculateGlobalObjective(network []*BaseStation) float64 {
+	totalCost := 0.0
+
+	for _, bs := range network {
+		if bs.CurrentPRB == -1 {
+			continue
+		}
+
+		for neighborID, weight := range bs.NeighborWeights {
+			var neighborColor PRB = -1
+			for _, node := range network {
+				if node.ID == neighborID {
+					neighborColor = node.CurrentPRB
+					break
+				}
+			}
+
+			if neighborColor != -1 && bs.CurrentPRB == neighborColor {
+				totalCost += weight
+			}
+		}
+	}
+
+	return totalCost / 2.0
+}
+
+//  ANARŞİNİN BEDELİ (PoA) HESAPLAYICISI
+
+// Bu fonksiyon "Merkezi Bir Süper Bilgisayar" gibi davranır.
+// Tüm ağı kuşbakışı görür ve renkleri en verimli şekilde dağıtır (Centralized Greedy).
+
+// İstasyonları "Zorluk Derecesine" göre sırala (Node Degree / Weight)
+// En çok komşusu olan (en zor) istasyona önce renk verirsek, global optimuma yaklaşırız.
+// (Basit bir Bubble Sort yapıyoruz, node sayısı az olduğu için yeterli)
+
+func CalculateCentralizedOptimum(network []*BaseStation) float64 {
+	// Mevcut simülasyonu bozmamak için geçici bir renk haritası oluşturuyoruz
+	tempColors := make(map[Agent_ID]PRB)
+	for _, bs := range network {
+		tempColors[bs.ID] = -1 // Önce herkes renksiz
+	}
+
+	sortedNodes := make([]*BaseStation, len(network))
+	copy(sortedNodes, network)
+
+	for i := 0; i < len(sortedNodes); i++ {
+		for j := 0; j < len(sortedNodes)-i-1; j++ {
+			// Komşu sayısı * Ağırlık toplamı mantığıyla "zorluk" ölçelim
+			weightI := 0.0
+			for _, w := range sortedNodes[j].NeighborWeights {
+				weightI += w
+			}
+
+			weightJ := 0.0
+			for _, w := range sortedNodes[j+1].NeighborWeights {
+				weightJ += w
+			}
+
+			if weightI < weightJ { // Büyükten küçüğe sırala
+				sortedNodes[j], sortedNodes[j+1] = sortedNodes[j+1], sortedNodes[j]
+			}
+		}
+	}
+
+	// Merkezi Zeka ile Renk Dağıt (Greedy Optimization)
+	const MaxColors = 5 //simülasyon sayısı ile aynı
+
+	for _, bs := range sortedNodes {
+		bestColor := PRB(0)
+		minGlobalImpact := math.MaxFloat64
+
+		for c := PRB(0); c < MaxColors; c++ {
+			currentImpact := 0.0
+
+			for neighborID, weight := range bs.NeighborWeights {
+				if assignedColor, exists := tempColors[neighborID]; exists && assignedColor != -1 {
+					if assignedColor == c {
+						currentImpact += weight
+					}
+				}
+			}
+
+			if currentImpact < minGlobalImpact {
+				minGlobalImpact = currentImpact
+				bestColor = c
+			}
+		}
+		tempColors[bs.ID] = bestColor
+	}
+
+	// Bu mükemmel dağıtımın toplam maliyetini hesapla
+	totalCentralizedCost := 0.0
+	for _, bs := range network {
+		myColor := tempColors[bs.ID]
+		for neighborID, weight := range bs.NeighborWeights {
+			neighborColor := tempColors[neighborID]
+			if myColor == neighborColor {
+				totalCentralizedCost += weight
+			}
+		}
+	}
+
+	return totalCentralizedCost / 2.0
+}
+
+// SINR ve SHANNON KAPASİTE HESABI
+// 1. Sinyal Gücü (Signal Power - P_i * h_ii)
+// Kendi kullanıcımız bize "UserDistance" kadar uzakta varsayıyoruz.
+// Ters Kare Yasası + Shadowing (Ortalama 1.0 kabul edelim kendimiz için)
+// Girişim Gücü (Interference Power - Sum(P_j * h_ji))
+// Sadece "Aynı Rengi" kullanan komşulardan gelen gürültüyü topla
+// SINR Hesabı (Signal / (Interference + Noise))
+// Shannon Kapasitesi (C = B * log2(1 + SINR))
+
+// Sinyal Kazancı (Path Loss) Hesabı: 1 / d^2 (Basit Serbest Uzay Modeli)
+// Mesafe (actualUserDist) arttıkça, payda büyür ve kazanç düşer.
+
+func (bs *BaseStation) CalculateShannonCapacity(network []*BaseStation) {
+
+	// Her istasyon için 10 metre ile 300 metre arasında rastgele bir kullanıcı mesafesi belirleyelim.
+	minDist := 10.0
+	maxDist := 300.0
+
+	rSource := rand.NewSource(time.Now().UnixNano() + int64(bs.ID)*100)
+	rGen := rand.New(rSource)
+
+	actualUserDist := minDist + rGen.Float64()*(maxDist-minDist)
+
+	signalGain := ReferenceLoss * math.Pow(actualUserDist, -PathLossExponent)
+	signalPower := TxPowerWatts * signalGain
+
+	interferencePower := 0.0
+
+	if bs.State == STATE_COMMITTED {
+		for neighborID, neighborColor := range bs.NeighborMap {
+			if neighborColor == bs.CurrentPRB {
+				// neighborID'den bana gelen ağırlık
+				h_ji := bs.NeighborWeights[neighborID]
+				interferencePower += (TxPowerWatts * h_ji)
+			}
+		}
+	}
+
+	sinr := signalPower / (interferencePower + NoiseWatts)
+
+	capacity := BandwidthHz * math.Log2(1+sinr) / 1e6
+
+	bs.Throughput = capacity
+
+}
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
-	numDevice := 20   // İstasyon sayısı
-	areaSize := 200.0 // Alan boyutu
-	threshold := 45.0 // Komşuluk mesafesi
+	numDevice := 40    // İstasyon sayısı
+	areaSize := 400.0  // Alan boyutu
+	threshold := 100.0 // Komşuluk mesafesi
 
 	fmt.Println("--- 5G Distributed Resource Management Simulation Commences ---")
 
@@ -236,18 +442,49 @@ func main() {
 		Network[i] = NewBaseStation(Agent_ID(i), rand.Float64()*areaSize, rand.Float64()*areaSize)
 	}
 
-	//Topolojiyi Kur
+	// Topoloji ve Ağırlık Hesabı
+
+	// Biz bu kodda rastgele sayı üretmiyoruz elektromanyetik dalgaların yayılım fiziğini simüle ediyoruz.
+	// Doğada (ses, ışık ve radyo sinyalleri) bir kaynaktan uzaklaştıkça, sinyal gücü mesafenin karesiyle ters orantılı olarak azalır.
+	// Buna fizikte Ters Kare Yasası denir
+
+	// Mantık: Bir baz istasyonunun dibindeyken (mesafe az) sinyal çok güçlüdür ve "Girişim" (Interference) riski çok yüksektir
+	// Mantık: İstasyondan çok uzaklaştığında (mesafe çok) sinyal zayıflar ve girişim etkisi neredeyse sıfıra iner.
+
+	// 1. Temel Yol Kaybı (Inverse Square Law)  Deterministik
+	// Şehir içi ortam varsayımıyla üssü 2.5 yapabiliriz
+
+	// 2. Gölgeleme (Shadowing) - Stokastik / Rastgelelik
+	// Binaların, ağaçların yarattığı rastgele sinyal değişimleri.
+	// Standart Sapma (Sigma) = 0.5 (Orta yoğunluklu engel)
+
+	fmt.Println("\n--- Calculating Path Loss & Shadowing ---")
+
 	for i := 0; i < numDevice; i++ {
 		for j := i + 1; j < numDevice; j++ {
 			dist := Distance(Network[i], Network[j])
+
+			// Eşik değer kontrolü (Menzil dışındaysa hesaplama yapma)
 			if dist < threshold {
-				// Komşuluk Listesine Ekle
+
+				baseWeight := ReferenceLoss * math.Pow(dist, -PathLossExponent)
+
+				shadowing := math.Exp(rand.NormFloat64() * 0.5)
+
+				// 3. Nihai Gerçekçi Ağırlık
+				finalWeight := baseWeight * shadowing
+
+				Network[i].NeighborWeights[Network[j].ID] = finalWeight
+				Network[j].NeighborWeights[Network[i].ID] = finalWeight
+
 				Network[i].Neighbros = append(Network[i].Neighbros, Network[j].ID)
 				Network[j].Neighbros = append(Network[j].Neighbros, Network[i].ID)
-				// Sanal Kabloları Bağla
+
 				Network[i].Outbox[Network[j].ID] = Network[j].Inbox
 				Network[j].Outbox[Network[i].ID] = Network[i].Inbox
-				fmt.Printf("Connection: BS-%d <--> BS-%d (Distance: %.2fm)\n", i, j, dist)
+
+				fmt.Printf("Link: BS-%d <--> BS-%d | Dist: %.1fm | Shadowing: %.2fx | Final Weight: %.5f\n",
+					i, j, dist, shadowing, finalWeight)
 			}
 		}
 	}
@@ -268,10 +505,50 @@ func main() {
 			status = fmt.Sprintf(" PRB-%d", bs.CurrentPRB)
 		}
 		fmt.Printf("BS-%d: %s (Neighbors: %d)\n", bs.ID, status, len(bs.Neighbros))
-	}
-	// ... Main fonksiyonunun içi, loop bittikten sonra ...
 
-	// Görselleştirme için veri yapısı
+	}
+
+	// ----------------------------------------------------
+
+	fmt.Println("\n--- CALCULATING NETWORK THROUGHPUT (SHANNON CAPACITY) ---")
+
+	totalNetworkCapacity := 0.0
+
+	for _, bs := range Network {
+		bs.CalculateShannonCapacity(Network) // Hesapla ve Struct'a kaydet
+		totalNetworkCapacity += bs.Throughput
+
+		fmt.Printf("BS-%d | Color: %d | Throughput: %.2f Mbps\n", bs.ID, bs.CurrentPRB, bs.Throughput)
+	}
+
+	fairnessScore := CalculateJainsFairness(Network)
+	globalObjective := CalculateGlobalObjective(Network)
+
+	fmt.Printf("\n>>> SYSTEM PERFORMANCE RESULTS V1 <<<\n")
+	fmt.Printf("1. Total Network Capacity : %.2f Mbps (Higher is better)\n", totalNetworkCapacity)
+	fmt.Printf("2. Average User Speed     : %.2f Mbps\n", totalNetworkCapacity/float64(numDevice))
+
+	fmt.Println("------------------------------------------------------------------")
+	fmt.Printf("\n>>> SYSTEM PERFORMANCE V2 <<<\n")
+	fmt.Printf("Jain's Fairness Index: %.4f (1.0 = Perfect Fairness)\n", fairnessScore)
+	fmt.Printf("Global Objective (Total Interference): %.6f (Goal: Close to 0)\n", globalObjective)
+
+	centralizedOptimal := CalculateCentralizedOptimum(Network)
+	var poa float64
+	epsilon := 1e-9
+
+	if globalObjective < epsilon && centralizedOptimal < epsilon {
+		poa = 1.0
+	} else if centralizedOptimal < epsilon {
+		poa = 999.0
+	} else {
+		poa = globalObjective / centralizedOptimal
+	}
+
+	fmt.Printf("Centralized Optimum (Benchmark)   : %.6f\n", centralizedOptimal)
+	fmt.Printf(">>> PRICE OF ANARCHY (PoA)        : %.4f (Goal: Close to 1.0)\n", poa)
+	fmt.Println("------------------------------------------------------------------")
+
 	type VizData struct {
 		Nodes []struct {
 			ID    int     `json:"id"`
@@ -287,7 +564,7 @@ func main() {
 
 	data := VizData{}
 	for _, bs := range Network {
-		// Node ekle
+		// Düğümleri ekle
 		data.Nodes = append(data.Nodes, struct {
 			ID    int     `json:"id"`
 			X     float64 `json:"x"`
@@ -301,7 +578,7 @@ func main() {
 		})
 
 		for _, neighborID := range bs.Neighbros {
-			if bs.ID < neighborID {
+			if bs.ID < neighborID { // Her kenarı bir kez eklemek için
 				data.Edges = append(data.Edges, struct {
 					Source int `json:"source"`
 					Target int `json:"target"`
@@ -313,8 +590,7 @@ func main() {
 		}
 	}
 
-	// Dosyaya yaz
 	file, _ := json.MarshalIndent(data, "", " ")
 	_ = os.WriteFile("viz_data.json", file, 0644)
-	fmt.Println(" Veriler 'viz_data.json' dosyasına kaydedildi.")
+	fmt.Println(" The data has been saved to the “viz_data.json” file.")
 }

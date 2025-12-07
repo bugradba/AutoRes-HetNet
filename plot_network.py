@@ -1,95 +1,130 @@
 import json
 import matplotlib.pyplot as plt
 import networkx as nx
-import matplotlib.cm as cm
+import numpy as np
+from matplotlib.patches import Circle
+import matplotlib.lines as mlines
 
 def main():
     filename = 'viz_data.json'
+
+    # Veriyi Yükle
     try:
         with open(filename, 'r') as f:
             data = json.load(f)
-        print(f" '{filename}' successfully loaded.")
+        print(f" '{filename}' başarıyla yüklendi.")
     except FileNotFoundError:
-        print(f" ERROR: '{filename}' not found.")
-        print("   Please run the Go simulation first.")
+        print(f" HATA: '{filename}' bulunamadı. Lütfen önce Go simülasyonunu çalıştırın.")
         return
 
-    G = nx.Graph()
+    # Grafik Ayarları
+    plt.style.use('seaborn-v0_8-whitegrid') # Arka planı ızgaralı ve temiz yapar
+    fig, ax = plt.subplots(figsize=(14, 12))
 
+    # NetworkX Grafiğini Oluştur
+    G = nx.Graph()
     pos = {}
-    node_prbs = []
-    labels = {}
-    ordered_nodes = []
+    node_colors = []
+    prb_map = {} # ID -> PRB
+
+    # Renk Paleti (Set1 veya Tab10 gibi belirgin paletler)
+    # PRB 0-9 arası için sabit renkler, -1 için gri
+    cmap = plt.get_cmap('Set1')
+
     for node in data['nodes']:
         n_id = node['id']
-
-        ordered_nodes.append(n_id)
         G.add_node(n_id)
-
         pos[n_id] = (node['x'], node['y'])
-        node_prbs.append(node['color'])
+        prb = node['color']
+        prb_map[n_id] = prb
 
-        labels[n_id] = f"{n_id}"
+        if prb == -1:
+            node_colors.append('#95a5a6') # Gri (Conflict/Fail)
+        else:
+            node_colors.append(cmap(prb % 9)) # Renk döngüsü
 
     for edge in data['edges']:
         G.add_edge(edge['source'], edge['target'])
 
-    cmap = plt.get_cmap('tab20')
 
-    node_colors = []
-    for prb in node_prbs:
-        if prb == -1:
-            node_colors.append('lightgray')
-        else:
-            node_colors.append(cmap(prb % 20))
+    # Kapsama Alanlarını Çiz
+    # Her istasyonun etrafına yarı saydam daireler ekleyelim
+    # Radius'u ortalama mesafeye göre tahmini bir değer veriyoruz (Görsel amaçlı)
+    # Sınır çizgisi (Border)
+    for n_id, (x, y) in pos.items():
+        circle = Circle((x, y), radius=15, color=node_colors[n_id], alpha=0.1, linewidth=0)
+        ax.add_patch(circle)
+        circle_border = Circle((x, y), radius=15, color=node_colors[n_id], fill=False, alpha=0.3, linestyle='--')
+        ax.add_patch(circle_border)
 
-    # 6. Drawing Process
-    plt.figure(figsize=(12, 10))
 
-    nx.draw_networkx_edges(G, pos,
-                           width=1.5,
-                           alpha=0.4,
-                           edge_color='gray')
+    # Kenarları (Girişimleri) Çiz
+    # Mesafeye göre otomatik alpha (şeffaflık) ayarı yapmak mümkün ama basit tutalım
+    nx.draw_networkx_edges(G, pos, ax=ax, width=1.2, alpha=0.3, edge_color='#7f8c8d')
 
-    nx.draw_networkx_nodes(G, pos,
-                           nodelist=ordered_nodes,
+    #Düğümleri (Baz İstasyonlarını) Çiz
+    nx.draw_networkx_nodes(G, pos, ax=ax,
                            node_color=node_colors,
-                           node_size=700,
-                           edgecolors='black', # Black frame
-                           linewidths=1.0)
+                           node_size=600,
+                           edgecolors='white',
+                           linewidths=2)
 
-    nx.draw_networkx_labels(G, pos,
-                            labels=labels,
-                            font_size=9,
-                            font_weight='bold',
-                            font_color='black')
+    # Etiketleri Yaz
+    # Okunabilirlik için siyah outline (gölge) ekleyelim
+    nx.draw_networkx_labels(G, pos, ax=ax, font_size=10, font_weight='bold', font_color='white')
 
-    plt.title(f"5G Distributed Resource Management - {len(ordered_nodes)} Base Stations", fontsize=15)
-    plt.axis('off') # Hide axis lines
-
-    plt.text(0.05, 0.95, "Colors represent different PRB (Frequency) blocks.\nGray: Assignment Failed",
-             transform=plt.gca().transAxes, fontsize=10,
-             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-    total_stations = len(ordered_nodes)
-    successful_stations = sum(1 for n in node_prbs if n != -1)
-    failed_stations = total_stations - successful_stations
-    unique_prbs = len(set(n for n in node_prbs if n != -1))
+    import matplotlib.patheffects as path_effects
+    texts = nx.draw_networkx_labels(G, pos, ax=ax, font_size=10, font_weight='bold', font_color='white')
+    for _, text in texts.items():
+        text.set_path_effects([path_effects.withStroke(linewidth=3, foreground='black')])
 
 
-    print("-------------- SIMULATION ANALYSIS REPORT ---------------------------")
-    print(f"🔹 Total Base Stations : {total_stations}")
-    print("------------------------------------------------------------------")
-    print(f" Successful Assignments : {successful_stations}")
-    print("------------------------------------------------------------------")
-    print(f" Failed (Conflicts)     : {failed_stations}")
-    print("------------------------------------------------------------------")
-    print(f" Success Rate           : %{100 * successful_stations / total_stations:.1f}")
-    print("------------------------------------------------------------------")
-    print(f" Number of Used PRBs    : {unique_prbs}")
-    print("-" * 40)
+    # İstatistik Kutusu
+    total = len(data['nodes'])
+    success = sum(1 for n in data['nodes'] if n['color'] != -1)
+    fail = total - success
+    success_rate = (success / total) * 100
+    used_prbs = len(set(n['color'] for n in data['nodes'] if n['color'] != -1))
 
-    # 8. Show
+    stats_text = (
+        f" NETWORK PERFORMANCE REPORT\n"
+        f"──────────────────────────\n"
+        f"Nodes (Base Stations) : {total}\n"
+        f"Successful Allocation : {success}\n"
+        f"Conflicts / Failed    : {fail}\n"
+        f"Success Rate          : {success_rate:.1f}%\n"
+        f"Unique PRBs Used      : {used_prbs}\n"
+        f"──────────────────────────\n"
+        f"Algorithm : Distributed Game Theory\n"
+        f"Model     : Path Loss + Shadowing"
+    )
+
+
+    props = dict(boxstyle='round,pad=1', facecolor='white', alpha=0.9, edgecolor='gray')
+    ax.text(0.99, 0.99, stats_text, transform=ax.transAxes, fontsize=9,
+            verticalalignment='top', horizontalalignment='right', bbox=props, fontfamily='monospace')
+
+    #Lejant (Frekans Renkleri)
+    # Mevcut PRB'leri bul ve sırala
+    legend_handles = []
+    active_prbs = sorted(list(set(prb_map.values())))
+    for prb in active_prbs:
+        color = '#95a5a6' if prb == -1 else cmap(prb % 9)
+        label = "No Service" if prb == -1 else f"Frequency Block {prb}"
+        legend_handles.append(mlines.Line2D([], [], color='white', marker='o', markersize=12,
+                                            markerfacecolor=color, label=label, markeredgecolor='gray'))
+
+    ax.legend(handles=legend_handles, loc='lower left', title="Resource Blocks (PRB)", frameon=True, framealpha=0.8)
+
+    # Başlık ve Ayarlar
+    plt.title("5G/6G Heterogeneous Network Simulation\nDistributed Resource Allocation via Game Theory",
+              fontsize=16, fontweight='bold', pad=12 ,y=0.94)
+    plt.axis('off') # Eksenleri kapat
+
+    # Dosyayı Yüksek Çözünürlükte Kaydet
+    plt.tight_layout()
+    plt.savefig("network_simulation_result.png", dpi=300, bbox_inches='tight')
+    print("The graphic has been saved in high quality as “network_simulation_result.png”")
     plt.show()
 
 if __name__ == "__main__":
