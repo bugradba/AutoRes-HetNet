@@ -395,38 +395,52 @@ func CalculateCentralizedOptimum(network []*BaseStation) float64 {
 // Mesafe (actualUserDist) arttıkça, payda büyür ve kazanç düşer.
 
 func (bs *BaseStation) CalculateShannonCapacity(network []*BaseStation) {
-
-	// Her istasyon için 10 metre ile 300 metre arasında rastgele bir kullanıcı mesafesi belirleyelim.
-	minDist := 10.0
-	maxDist := 300.0
-
+	// Rastgele seed'i istasyon ID'sine göre belirle
 	rSource := rand.NewSource(time.Now().UnixNano() + int64(bs.ID)*100)
 	rGen := rand.New(rSource)
 
-	actualUserDist := minDist + rGen.Float64()*(maxDist-minDist)
-
-	signalGain := ReferenceLoss * math.Pow(actualUserDist, -PathLossExponent)
-	signalPower := TxPowerWatts * signalGain
-
+	// Önce girişim seviyesini hesapla
 	interferencePower := 0.0
+	interferenceCount := 0
+	totalInterferenceWeight := 0.0
 
 	if bs.State == STATE_COMMITTED {
 		for neighborID, neighborColor := range bs.NeighborMap {
 			if neighborColor == bs.CurrentPRB {
-				// neighborID'den bana gelen ağırlık
 				h_ji := bs.NeighborWeights[neighborID]
 				interferencePower += (TxPowerWatts * h_ji)
+				interferenceCount++
+				totalInterferenceWeight += h_ji
 			}
 		}
 	}
 
-	sinr := signalPower / (interferencePower + NoiseWatts)
+	// Girişim durumuna göre kullanıcı mesafesini belirle
+	minDist := 10.0
+	maxDist := 100.0 // 300 çok fazlaydı, düşürelim
 
+	// Girişim varsa kullanıcı daha yakın olmalı (cell shrinkage)
+	if interferenceCount > 0 {
+		// Ağır girişim varsa maksimum mesafeyi kısalt
+		interferenceRatio := math.Min(totalInterferenceWeight/1e-6, 1.0)
+		maxDist = 100.0 - (interferenceRatio * 50.0) // 50-100m arası
+	} else {
+		maxDist = 150.0 // Girişim yoksa daha geniş kapsama
+	}
+
+	actualUserDist := minDist + rGen.Float64()*(maxDist-minDist)
+
+	// Sinyal hesabı
+	signalGain := ReferenceLoss * math.Pow(actualUserDist, -PathLossExponent)
+	signalPower := TxPowerWatts * signalGain
+
+	// SINR ve kapasite
+	sinr := signalPower / (interferencePower + NoiseWatts)
 	capacity := BandwidthHz * math.Log2(1+sinr) / 1e6
 
 	bs.Throughput = capacity
-
 }
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
@@ -483,7 +497,7 @@ func main() {
 				Network[i].Outbox[Network[j].ID] = Network[j].Inbox
 				Network[j].Outbox[Network[i].ID] = Network[i].Inbox
 
-				fmt.Printf("Link: BS-%d <--> BS-%d | Dist: %.1fm | Shadowing: %.2fx | Final Weight: %.5f\n",
+				fmt.Printf("Link: BS-%d <--> BS-%d | Dist: %.1fm | Shadowing: %.2fx | Final Weight: %.3e\n",
 					i, j, dist, shadowing, finalWeight)
 			}
 		}
@@ -531,7 +545,12 @@ func main() {
 	fmt.Println("------------------------------------------------------------------")
 	fmt.Printf("\n>>> SYSTEM PERFORMANCE V2 <<<\n")
 	fmt.Printf("Jain's Fairness Index: %.4f (1.0 = Perfect Fairness)\n", fairnessScore)
-	fmt.Printf("Global Objective (Total Interference): %.6f (Goal: Close to 0)\n", globalObjective)
+	if globalObjective > 1e-15 {
+		fmt.Printf("Global Objective (Total Interference): %.3e (%.2f dBm equivalent)\n",
+			globalObjective, 10*math.Log10(globalObjective/1e-3))
+	} else {
+		fmt.Printf("Global Objective (Total Interference): < 1e-15 (Virtually Zero)\n")
+	}
 
 	centralizedOptimal := CalculateCentralizedOptimum(Network)
 	var poa float64
@@ -545,9 +564,38 @@ func main() {
 		poa = globalObjective / centralizedOptimal
 	}
 
-	fmt.Printf("Centralized Optimum (Benchmark)   : %.6f\n", centralizedOptimal)
+	if centralizedOptimal > 1e-15 {
+		fmt.Printf("Centralized Optimum (Benchmark)   : %.3e (%.2f dBm equivalent)\n",
+			centralizedOptimal, 10*math.Log10(centralizedOptimal/1e-3))
+	} else {
+		fmt.Printf("Centralized Optimum (Benchmark)   : < 1e-15 (Virtually Zero)\n")
+	}
 	fmt.Printf(">>> PRICE OF ANARCHY (PoA)        : %.4f (Goal: Close to 1.0)\n", poa)
 	fmt.Println("------------------------------------------------------------------")
+
+	fmt.Println("\n--- DETAILED INTERFERENCE CHECK ---")
+	totalRawInterference := 0.0
+	for _, bs := range Network {
+		if bs.CurrentPRB == -1 {
+			continue
+		}
+
+		localInterference := 0.0
+		for neighborID, weight := range bs.NeighborWeights {
+			// Komşunun rengini bul
+			for _, neighbor := range Network {
+				if neighbor.ID == neighborID && neighbor.CurrentPRB == bs.CurrentPRB {
+					localInterference += weight
+					totalRawInterference += weight
+					fmt.Printf("BS-%d <-> BS-%d | Both use Color %d | Weight: %.3e\n",
+						bs.ID, neighborID, bs.CurrentPRB, weight)
+					break
+				}
+			}
+		}
+	}
+	fmt.Printf("Raw Total Interference: %.3e\n", totalRawInterference)
+	fmt.Printf("Divided by 2: %.3e\n", totalRawInterference/2.0)
 
 	type VizData struct {
 		Nodes []struct {
