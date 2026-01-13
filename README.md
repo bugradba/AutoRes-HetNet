@@ -1,83 +1,30 @@
-Autonomous and Distributed Resource Management in 5G/6G HetNets
-🔍 Project Overview
+# Autonomous and Distributed Resource Management in 5G/6G HetNets
 
-This project addresses the Physical Resource Block (PRB) allocation problem in 5G heterogeneous networks (HetNets) using a fully decentralized and scalable approach.
-Instead of relying on a centralized controller, the system enables autonomous base stations to make local decisions while still achieving global network optimization.
+## Abstract
 
-The proposed solution is based on a Graph Coloring Game (GCG) formulation and is evaluated under realistic physical layer conditions, including Urban Macro (UMa) channel models and stochastic user distribution.
+This study addresses the Physical Resource Block (PRB) allocation problem in 5G heterogeneous networks (HetNets) using a fully distributed and scalable approach. The proposed method eliminates the need for a centralized controller by enabling autonomous base stations to make local resource allocation decisions while collectively optimizing a global objective function.
 
-🧠 Key Idea
+The system is based on a Graph Coloring Game (GCG) formulation and is evaluated under realistic physical layer conditions, including Urban Macro (UMa) channel models and stochastic user placement. Simulation results conducted with 40 base stations demonstrate that the proposed distributed algorithm completely eliminates inter-cell interference, achieving an average interference level of −56.34 dBm.
 
-Local autonomy can lead to global order.
+Despite relying solely on local information, the algorithm successfully converges to a Nash Equilibrium, reducing the initially high interference cost to zero. This behavior provides strong evidence that local autonomous decision-making can lead to global network coordination.
 
-Each base station independently selects PRBs by interacting only with its neighbors.
-Despite the absence of centralized coordination, the system converges to a Nash Equilibrium, where inter-cell interference is minimized and overall network performance is optimized.
+Under a bandwidth of 20 MHz, the system achieves an average user throughput of 223.72 Mbps, while maintaining a Jain’s Fairness Index of 0.7140. The results confirm that the proposed distributed resource management framework is scalable, interference-aware, and well-suited for dense 5G and future 6G network deployments.
 
-⚙️ System Model & Methodology
+## Key Features
 
-Network Type: 5G / 6G Heterogeneous Networks (HetNets)
+- Fully distributed PRB allocation without centralized control
+- Game-theoretic formulation using Graph Coloring Games
+- Realistic physical layer modeling (Urban Macro)
+- Nash Equilibrium convergence
+- High throughput and fairness performance
+- Scalable architecture for dense HetNet scenarios
 
-Number of Base Stations: 40
+## Technologies
 
-Bandwidth: 20 MHz
+- Programming Language: Go
+- Simulation Domain: 5G / 6G Wireless Networks
+- Core Concepts: Game Theory, Distributed Systems, Resource Management
 
-Channel Model: Urban Macro (UMa)
+## Future Work
 
-Resource Allocation Model: Graph Coloring Game
-
-Decision Making: Fully distributed (local information only)
-
-Each base station is modeled as a rational agent that:
-
-Competes for PRBs with neighboring stations
-
-Minimizes experienced interference
-
-Updates its strategy iteratively until equilibrium is reached
-
-📊 Simulation Results
-Metric	Result
-Interference Level	−56.34 dBm (effectively eliminated)
-User Throughput (Average)	223.72 Mbps
-Jain’s Fairness Index	0.7140
-Convergence	Nash Equilibrium achieved
-Scalability	High (no central controller)
-
-🔹 Although decisions are made locally, the algorithm successfully optimizes the global objective function, reducing the initially high interference cost to zero at equilibrium.
-
-✅ Key Contributions
-
-✔ Fully distributed PRB allocation without a central controller
-
-✔ Game-theoretic formulation using Graph Coloring Games
-
-✔ Realistic physical layer modeling
-
-✔ Demonstration that local decision-making ensures global coordination
-
-✔ Scalable and suitable for dense 5G/6G deployments
-
-🚀 Future Extensions (Planned)
-
-This framework is highly compatible with learning-based approaches, including:
-
-Reinforcement Learning (RL) for adaptive PRB selection
-
-Federated Learning (FL) for collaborative model training without raw data sharing
-
-Online Learning for real-time adaptation to dynamic network conditions
-
-These extensions can further improve adaptability, robustness, and performance in non-stationary environments.
-
-🛠 Technologies
-
-Language: Go (simulation core)
-
-Visualization: Python (optional)
-
-Modeling: Game Theory, Wireless Channel Models
-
-📌 Conclusion
-
-This project demonstrates that distributed intelligence can effectively replace centralized control in next-generation wireless networks.
-By combining game theory, realistic channel modeling, and autonomous agents, the system achieves high throughput, fairness, and zero interference, making it a strong candidate for future 5G/6G resource management architectures.
+The current framework can be extended with learning-based methods such as Reinforcement Learning, Federated Learning, and Online Learning to improve adaptability in dynamic and non-stationary network environments.
