@@ -6,7 +6,7 @@ from matplotlib.patches import Circle
 import matplotlib.lines as mlines
 
 def main():
-    filename = 'viz_data.json'
+    filename = '../viz_data.json'
 
     # Veriyi Yükle
     try:
