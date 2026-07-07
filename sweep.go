@@ -27,9 +27,13 @@ import (
 // metrikleri zaten ölçekten bağımsızdır.
 // ============================================================
 
-func RunSweep(runsPer int, baseSeed int64, csvPath string) {
-	Ks := []int{3, 4, 5, 6}
-	Ns := []int{20, 40, 60, 80}
+func RunSweep(runsPer int, baseSeed int64, csvPath string, Ks, Ns []int) {
+	if len(Ks) == 0 {
+		Ks = []int{3, 4, 5, 6}
+	}
+	if len(Ns) == 0 {
+		Ns = []int{20, 40, 60, 80}
+	}
 
 	f, err := os.Create(csvPath)
 	if err != nil {

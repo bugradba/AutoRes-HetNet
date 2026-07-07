@@ -7,6 +7,8 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +23,8 @@ func main() {
 	sweep := flag.Bool("sweep", false, "K x N yakınsama taraması (madde 4); -runs hücre başına koşu sayısıdır")
 	timeScale := flag.Float64("timescale", 1.0, "protokol zamanlayıcı ölçeği (0.1 = 10x hızlı; tarama için önerilir)")
 	csvPath := flag.String("csv", "sweep_results.csv", "tarama ham verilerinin yazılacağı CSV yolu")
+	sweepK := flag.String("sweepK", "3,4,5,6", "taranacak K değerleri (virgülle; örn. stres için \"2,3\")")
+	sweepN := flag.String("sweepN", "20,40,60,80", "taranacak N değerleri (virgülle; örn. stres için \"80,120,160,200\")")
 	flag.Parse()
 
 	if *timeScale != 1.0 {
@@ -29,7 +33,7 @@ func main() {
 
 	if *sweep {
 		Verbose = false
-		RunSweep(*runs, *seed, *csvPath)
+		RunSweep(*runs, *seed, *csvPath, parseIntList(*sweepK), parseIntList(*sweepN))
 		return
 	}
 
@@ -227,4 +231,15 @@ func main() {
 	file, _ := json.MarshalIndent(data, "", " ")
 	_ = os.WriteFile("viz_data.json", file, 0644)
 	fmt.Println(" The data has been saved to the “viz_data.json” file.")
+}
+
+// parseIntList: "3,4,5" -> [3 4 5]; bozuk girdiler sessizce atlanır.
+func parseIntList(s string) []int {
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		if v, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && v > 0 {
+			out = append(out, v)
+		}
+	}
+	return out
 }
