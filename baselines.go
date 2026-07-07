@@ -80,7 +80,7 @@ func GreedyAssignment(network []*BaseStation) []PRB {
 	for _, bs := range order {
 		bestColor := PRB(0)
 		minImpact := math.MaxFloat64
-		for c := PRB(0); c < MaxColors; c++ {
+		for c := PRB(0); c < PRB(MaxColors); c++ {
 			impact := 0.0
 			for nid, w := range bs.NeighborWeights {
 				if ac := assign[idx[nid]]; ac != -1 && ac == c {
@@ -134,7 +134,7 @@ func DSATURAssignment(network []*BaseStation) []PRB {
 		bs := network[best]
 		bestColor := PRB(0)
 		minImpact := math.MaxFloat64
-		for c := PRB(0); c < MaxColors; c++ {
+		for c := PRB(0); c < PRB(MaxColors); c++ {
 			impact := 0.0
 			for nid, w := range bs.NeighborWeights {
 				if ac := assign[idx[nid]]; ac != -1 && ac == c {

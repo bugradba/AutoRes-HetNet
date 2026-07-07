@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type Agent_ID int
 
@@ -42,9 +45,41 @@ const (
 )
 
 // --- ALGORİTMA SABİTLERİ ---
-const (
-	MaxColors = 5 // K: ortogonal renk / PRB sayısı (tüm dosyalarda tek kaynak)
+// MaxColors artık değişken: -sweep modu K üzerinde tarama yapar.
+// Koşu başlamadan ÖNCE ayarlanır; ajanlar çalışırken asla değiştirilmez.
+var MaxColors = 5 // K: ortogonal renk / PRB sayısı (tüm dosyalarda tek kaynak)
+
+// --- PROTOKOL ZAMANLAYICILARI ---
+// Gözlem: yakınsama süresi her koşuda ~4.0 s çıkıyordu, çünkü süreyi
+// algoritmanın kendisi değil bu SABİT zamanlayıcılar domine ediyor
+// (başlangıç gecikmesi + think periyodu + commit zaman aşımı).
+// Bu yüzden: (1) hepsi tek kaynaktan yönetilir ve SetTimeScale ile
+// orantılı ölçeklenir (tarama deneylerini 10x+ hızlandırır),
+// (2) yakınsama, ölçekten bağımsız "protokol turu" (ThinkPeriod)
+// cinsinden de raporlanır.
+var (
+	StartDelayMax = 1000 * time.Millisecond // rastgele başlangıç gecikmesi üst sınırı
+	ThinkPeriod   = 500 * time.Millisecond  // Think() periyodu (1 protokol turu)
+	CommitTimeout = 2000 * time.Millisecond // CONFLICT beklemeden commit süresi
+	BackoffMax    = 500 * time.Millisecond  // çakışma sonrası rastgele geri çekilme üst sınırı
 )
+
+// SetTimeScale: tüm protokol zamanlayıcılarını orantılı ölçekler.
+// Oranlar korunduğu için protokol dinamiği (mesaj yarışları dahil)
+// niteliksel olarak aynı kalır; yalnızca duvar saati sıkışır.
+func SetTimeScale(s float64) {
+	scale := func(base time.Duration) time.Duration {
+		d := time.Duration(float64(base) * s)
+		if d < time.Millisecond {
+			d = time.Millisecond // zamanlayıcı sıfıra inmesin
+		}
+		return d
+	}
+	StartDelayMax = scale(1000 * time.Millisecond)
+	ThinkPeriod = scale(500 * time.Millisecond)
+	CommitTimeout = scale(2000 * time.Millisecond)
+	BackoffMax = scale(500 * time.Millisecond)
+}
 
 // --- SİMÜLASYON PARAMETRELERİ ---
 // Hata 2 düzeltmesi: makaledeki HER sayı bu sabitlerle üretilmeli.
@@ -81,6 +116,14 @@ type BaseStation struct {
 	NeighborMap     map[Agent_ID]PRB // Komşuların renklerini tuttuğu hafıza
 	Throughput      float64          // Mbps cinsinden veri hızı
 	Mutex           sync.Mutex
+
+	// Mesaj enstrümantasyonu (yakınsama analizi için):
+	// MsgSent[t]: t tipinde gönderilen mesaj sayısı; MsgDropped: alıcı
+	// kuyruğu dolu olduğu için DÜŞEN mesajlar (Send non-blocking).
+	// atomic ile artırılır: commit zamanlayıcısı goroutine'i ile ana
+	// döngü aynı anda gönderebilir.
+	MsgSent    [4]int64
+	MsgDropped int64
 }
 
 // NOT: Eski koddaki global Network ve wg değişkenleri kaldırıldı.

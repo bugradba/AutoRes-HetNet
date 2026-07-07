@@ -21,7 +21,7 @@ func TestBaselinesConsistency(t *testing.T) {
 			t.Fatalf("%s: atama uzunluğu %d != %d", name, len(a), len(net))
 		}
 		for i, c := range a {
-			if c < 0 || c >= MaxColors {
+			if c < 0 || c >= PRB(MaxColors) {
 				t.Fatalf("%s: istasyon %d geçersiz renk %d", name, i, c)
 			}
 		}

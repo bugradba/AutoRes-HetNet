@@ -106,8 +106,12 @@ func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, 
 	}
 
 	deadline := start.Add(maxWait)
+	poll := ThinkPeriod / 10 // yoklama, protokol turuna oranlı (ölçekle birlikte küçülür)
+	if poll < 5*time.Millisecond {
+		poll = 5 * time.Millisecond
+	}
 	for {
-		time.Sleep(50 * time.Millisecond) // yoklama aralığı
+		time.Sleep(poll)
 		if AllCommitted(net) {
 			converged = true
 			break
@@ -123,10 +127,10 @@ func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, 
 	}
 	wg.Wait()
 
-	// Yakınsamadan bittiyse: Think() içindeki 2 s'lik commit zamanlayıcıları
-	// hâlâ bekliyor olabilir; metrikleri yarışsız okumak için süre tanı.
+	// Yakınsamadan bittiyse: Think() içindeki commit zamanlayıcıları hâlâ
+	// bekliyor olabilir; metrikleri yarışsız okumak için süre tanı.
 	if !converged {
-		time.Sleep(2200 * time.Millisecond)
+		time.Sleep(CommitTimeout + 200*time.Millisecond)
 	}
 	return convSec, converged
 }
@@ -206,6 +210,9 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 
 	var (
 		convTimes  []float64 // yalnızca yakınsayan koşular
+		convRounds []float64 // yakınsama, protokol turu (ThinkPeriod) cinsinden
+		msgsPerBS  []float64 // istasyon başına toplam mesaj
+		conflicts  []float64 // toplam CONFLICT sayısı
 		commFracs  []float64
 		interfs    []float64
 		gains      []float64 // gain over greedy (tanımlı olanlar)
@@ -276,9 +283,13 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		avgCaps = append(avgCaps, avgCap)
 		fairs = append(fairs, fair)
 
+		ms := CollectMessageStats(net)
+		msgsPerBS = append(msgsPerBS, float64(ms.Total)/float64(len(net)))
+		conflicts = append(conflicts, float64(ms.Conflicts))
 		if converged {
 			convCount++
 			convTimes = append(convTimes, convSec)
+			convRounds = append(convRounds, convSec/ThinkPeriod.Seconds())
 		}
 		if obj < eps {
 			zeroInterf++
@@ -308,13 +319,16 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 			}
 		}
 
-		fmt.Printf("Run %3d | conv %5.1fs (%v) | committed %3.0f%% | interf %.3e | gain %.3f | PoA>= %.3f (opt exact=%v)\n",
-			r, convSec, converged, commFrac*100, obj, gain, poa, opt.Exact)
+		fmt.Printf("Run %3d | conv %5.1fs (%v) | committed %3.0f%% | msg/BS %5.1f | cnf %3d | interf %.3e | gain %.3f | PoA>= %.3f (opt exact=%v)\n",
+			r, convSec, converged, commFrac*100, float64(ms.Total)/float64(len(net)), ms.Conflicts, obj, gain, poa, opt.Exact)
 	}
 
 	fmt.Printf("\n================ ÖZET (%d koşu) ================\n", runs)
 	fmt.Println("Format: ortalama ± %95 GA (1.96·σ/√n)")
 	reportStat("Yakınsama süresi (s)", convTimes)
+	reportStat("Yakınsama (protokol turu)", convRounds)
+	reportStat("Mesaj / istasyon", msgsPerBS)
+	reportStat("CONFLICT sayısı", conflicts)
 	reportStat("COMMITTED oranı", commFracs)
 	reportStat("Toplam girişim (W)", interfs)
 	reportStat("Gain over Greedy", gains)
@@ -355,4 +369,23 @@ func meanServed(thr []float64, served []bool) float64 {
 		return 0
 	}
 	return sum / float64(n)
+}
+
+// MessageStats: koşu sonunda (goroutine'ler durduktan sonra) toplanan
+// mesaj sayaçları. Mesaj karmaşıklığı, dağıtık protokolün asıl maliyetidir.
+type MessageStats struct {
+	Total, Proposes, Conflicts, Dropped int64
+}
+
+func CollectMessageStats(net []*BaseStation) MessageStats {
+	var s MessageStats
+	for _, bs := range net {
+		for t := 0; t < 4; t++ {
+			s.Total += bs.MsgSent[t]
+		}
+		s.Proposes += bs.MsgSent[MSG_PROPOSE]
+		s.Conflicts += bs.MsgSent[MSG_CONFLICT]
+		s.Dropped += bs.MsgDropped
+	}
+	return s
 }

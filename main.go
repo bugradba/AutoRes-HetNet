@@ -18,7 +18,20 @@ func main() {
 	seed := flag.Int64("seed", 42, "temel tohum; koşu r'nin tohumu = seed + r (tekrarlanabilirlik)")
 	verbose := flag.Bool("v", false, "ajan mesajlarını yazdır (yalnızca -runs 1 için önerilir)")
 	optBudget := flag.Duration("optbudget", 3*time.Second, "koşu başına B&B optimum zaman bütçesi")
+	sweep := flag.Bool("sweep", false, "K x N yakınsama taraması (madde 4); -runs hücre başına koşu sayısıdır")
+	timeScale := flag.Float64("timescale", 1.0, "protokol zamanlayıcı ölçeği (0.1 = 10x hızlı; tarama için önerilir)")
+	csvPath := flag.String("csv", "sweep_results.csv", "tarama ham verilerinin yazılacağı CSV yolu")
 	flag.Parse()
+
+	if *timeScale != 1.0 {
+		SetTimeScale(*timeScale)
+	}
+
+	if *sweep {
+		Verbose = false
+		RunSweep(*runs, *seed, *csvPath)
+		return
+	}
 
 	if *runs > 1 {
 		Verbose = false // yüzlerce koşuda ajan logları hem okunmaz hem yavaşlatır
