@@ -3,64 +3,146 @@ package main
 import (
 	"math"
 	"math/rand"
-	"time"
 )
 
-// SINR ve SHANNON KAPASİTE HESABI
-// 1. Sinyal Gücü (Signal Power - P_i * h_ii)
-// Kendi kullanıcımız bize "UserDistance" kadar uzakta varsayıyoruz.
-// Ters Kare Yasası + Shadowing (Ortalama 1.0 kabul edelim kendimiz için)
-// Girişim Gücü (Interference Power - Sum(P_j * h_ji))
-// Sadece "Aynı Rengi" kullanan komşulardan gelen gürültüyü topla
-// SINR Hesabı (Signal / (Interference + Noise))
-// Shannon Kapasitesi (C = B * log2(1 + SINR))
+// SINR ve SHANNON KAPASİTE HESABI (Hata 4, 5 ve 6 düzeltilmiş model)
+//
+// İndirme yönü (downlink) SINR'ı KULLANICI (UE) KONUMUNDA hesaplanır:
+//
+//	SINR_i = S_i / ( Σ_j I_j + N0·B )
+//
+//	S_i : servis BS'ten UE'ye gelen güç             = Ptx · G0 · d_iU^-α · χ_i
+//	I_j : aynı PRB'yi kullanan, hizmetteki komşu j'den
+//	      UE'ye gelen güç                           = Ptx · G0 · d_jU^-α · χ_ij
+//
+// HATA 5 DÜZELTMELERİ (önceki adımdan):
+//  (1) Girişim, komşu BS'ten KULLANICIYA olan gerçek geometrik mesafeden.
+//  (2) Servis linkinde de log-normal gölgeleme (simetri).
+//  (3) SINR ≤ ~30 dB ve SE ≤ 8 bps/Hz tavanları.
+//
+// HATA 6 DÜZELTMESİ — DONMUŞ KANAL GERÇEKLEMESİ:
+// Jain indeksi throughput üzerinden hesaplanınca, throughput'u domine eden
+// rastgele kullanıcı mesafesi indeksi ele geçiriyordu: fairness, algoritmayı
+// değil kullanıcı yerleşiminin şansını ölçüyordu. Çözüm: kanalın TÜM
+// stokastik bileşenleri (UE konumları, servis gölgelemesi, her komşu link
+// için girişim gölgelemesi) koşu başına BİR KEZ çekilir (DrawChannel) ve
+// bütün tahsis şemaları (dağıtık NE, greedy, DSATUR, sabit reuse, rastgele)
+// AYNI gerçekleme üzerinde değerlendirilir (ComputeThroughputs). Böylece
+// şemalar arasındaki fairness/hız FARKI yalnızca tahsis kararından
+// kaynaklanır; kullanıcı yerleşiminin rastgeleliği ortak paydada sadeleşir.
+// Fiziksel yorum da doğrudur: kanal neyse odur; tahsis yalnızca "kim
+// kiminle girişir"i belirler.
 
-// Sinyal Kazancı (Path Loss) Hesabı: 1 / d^2 (Basit Serbest Uzay Modeli)
-// Mesafe (actualUserDist) arttıkça, payda büyür ve kazanç düşer.
+// Channel: bir koşunun donmuş kanal gerçeklemesi (ağ dizisi sırasıyla indeksli).
+type Channel struct {
+	UEX, UEY     []float64              // her istasyonun kullanıcısının konumu
+	DServ        []float64              // UE'nin servis BS'ine uzaklığı
+	ServShadow   []float64              // servis linki gölgelemesi χ_i
+	InterfShadow []map[Agent_ID]float64 // [i][j]: komşu j -> i'nin UE'si linki gölgelemesi χ_ij
+}
 
-func (bs *BaseStation) CalculateShannonCapacity(network []*BaseStation) {
-	// Rastgele seed'i istasyon ID'sine göre belirle
-	rSource := rand.NewSource(time.Now().UnixNano() + int64(bs.ID)*100)
-	rGen := rand.New(rSource)
+// lognormalShadow: log-normal gölgeleme çarpanı χ = exp(σ·X), X ~ N(0,1).
+// Topoloji kurulumu (BuildNetwork) ve fiziksel katman AYNI modeli kullanır.
+func lognormalShadow(rng *rand.Rand) float64 {
+	return math.Exp(rng.NormFloat64() * ShadowSigma)
+}
 
-	// Önce girişim seviyesini hesapla
-	interferencePower := 0.0
-	interferenceCount := 0
-	totalInterferenceWeight := 0.0
+// pathGain: log-uzaklık yol kaybı kazancı, G0 · d^-α (d0 = 1 m referans).
+func pathGain(d float64) float64 {
+	if d < 1.0 {
+		d = 1.0 // referans mesafenin altına inme
+	}
+	return ReferenceLoss * math.Pow(d, -PathLossExponent)
+}
 
-	if bs.State == STATE_COMMITTED {
-		for neighborID, neighborColor := range bs.NeighborMap {
-			if neighborColor == bs.CurrentPRB {
-				h_ji := bs.NeighborWeights[neighborID]
-				interferencePower += (TxPowerWatts * h_ji)
-				interferenceCount++
-				totalInterferenceWeight += h_ji
-			}
+// DrawChannel: koşunun tüm kanal rastgeleliğini BİR KEZ çeker.
+func DrawChannel(network []*BaseStation, rng *rand.Rand) *Channel {
+	n := len(network)
+	ch := &Channel{
+		UEX: make([]float64, n), UEY: make([]float64, n),
+		DServ:        make([]float64, n),
+		ServShadow:   make([]float64, n),
+		InterfShadow: make([]map[Agent_ID]float64, n),
+	}
+	for i, bs := range network {
+		d := UEMinDist + rng.Float64()*(UEMaxDist-UEMinDist)
+		theta := rng.Float64() * 2 * math.Pi
+		ch.DServ[i] = d
+		ch.UEX[i] = bs.X + d*math.Cos(theta)
+		ch.UEY[i] = bs.Y + d*math.Sin(theta)
+		ch.ServShadow[i] = lognormalShadow(rng)
+		ch.InterfShadow[i] = make(map[Agent_ID]float64, len(bs.NeighborWeights))
+		for nid := range bs.NeighborWeights {
+			ch.InterfShadow[i][nid] = lognormalShadow(rng)
 		}
 	}
+	return ch
+}
 
-	// Girişim durumuna göre kullanıcı mesafesini belirle
-	minDist := 10.0
-	maxDist := 100.0 // 300 çok fazlaydı, düşürelim
+// ComputeThroughputs: verilen renk ataması (assign) ve hizmet vektörü
+// (served; false => istasyon yayında değil, Hata 4) için, donmuş kanal
+// üzerinde her istasyonun kullanıcı hızını (Mbps) döndürür.
+func ComputeThroughputs(network []*BaseStation, assign []PRB, served []bool, ch *Channel) []float64 {
+	idx := indexOf(network)
+	out := make([]float64, len(network))
 
-	// Girişim varsa kullanıcı daha yakın olmalı (cell shrinkage)
-	if interferenceCount > 0 {
-		// Ağır girişim varsa maksimum mesafeyi kısalt
-		interferenceRatio := math.Min(totalInterferenceWeight/1e-6, 1.0)
-		maxDist = 100.0 - (interferenceRatio * 50.0) // 50-100m arası
-	} else {
-		maxDist = 150.0 // Girişim yoksa daha geniş kapsama
+	for i := range network {
+		// HATA 4 (1/2): hizmette olmayan istasyonun kullanıcısı 0 Mbps.
+		if !served[i] {
+			out[i] = 0
+			continue
+		}
+
+		signalPower := TxPowerWatts * pathGain(ch.DServ[i]) * ch.ServShadow[i]
+
+		// HATA 4 (2/2) + HATA 5 (1): girişim yalnızca fiilen yayında olan
+		// (served) aynı-renk komşulardan, interferer -> UE mesafesi üzerinden.
+		interferencePower := 0.0
+		for nid, shadow := range ch.InterfShadow[i] {
+			j := idx[nid]
+			if !served[j] || assign[j] != assign[i] {
+				continue
+			}
+			nb := network[j]
+			dJU := math.Hypot(nb.X-ch.UEX[i], nb.Y-ch.UEY[i])
+			interferencePower += TxPowerWatts * pathGain(dJU) * shadow
+		}
+
+		// HATA 5 (3): SINR ve spektral verim tavanları.
+		sinr := signalPower / (interferencePower + NoiseWatts)
+		if sinr > MaxSINR {
+			sinr = MaxSINR
+		}
+		se := math.Log2(1 + sinr)
+		if se > MaxSpectralEff {
+			se = MaxSpectralEff
+		}
+		out[i] = BandwidthHz * se / 1e6 // Mbps
 	}
+	return out
+}
 
-	actualUserDist := minDist + rGen.Float64()*(maxDist-minDist)
+// NEAssignment: dağıtık koşunun ürettiği sonucu (renk + hizmet durumu)
+// atama vektörlerine çevirir. COMMITTED olamayan istasyon hizmet dışıdır.
+func NEAssignment(network []*BaseStation) (assign []PRB, served []bool) {
+	assign = make([]PRB, len(network))
+	served = make([]bool, len(network))
+	for i, bs := range network {
+		assign[i] = bs.CurrentPRB
+		served[i] = bs.State == STATE_COMMITTED
+	}
+	return assign, served
+}
 
-	// Sinyal hesabı
-	signalGain := ReferenceLoss * math.Pow(actualUserDist, -PathLossExponent)
-	signalPower := TxPowerWatts * signalGain
-
-	// SINR ve kapasite
-	sinr := signalPower / (interferencePower + NoiseWatts)
-	capacity := BandwidthHz * math.Log2(1+sinr) / 1e6
-
-	bs.Throughput = capacity
+// EvaluateNetworkThroughput: tek koşu / görselleştirme uyumluluğu —
+// kanal çeker, NE'yi değerlendirir, sonuçları bs.Throughput'a yazar
+// ve kanalı döndürür (baseline kıyasları aynı kanalı kullanabilsin diye).
+func EvaluateNetworkThroughput(network []*BaseStation, rng *rand.Rand) *Channel {
+	ch := DrawChannel(network, rng)
+	assign, served := NEAssignment(network)
+	thr := ComputeThroughputs(network, assign, served, ch)
+	for i, bs := range network {
+		bs.Throughput = thr[i]
+	}
+	return ch
 }

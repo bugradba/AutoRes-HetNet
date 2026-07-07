@@ -32,6 +32,15 @@ const (
 	PathLossExponent = 3.0   // Şehir içi ortam için sönümleme katsayısı
 )
 
+// --- FİZİKSEL KATMAN MODEL SABİTLERİ (Hata 5) ---
+const (
+	ShadowSigma    = 0.5   // log-normal gölgeleme σ'sı (doğal log ölçeğinde; topoloji ve PHY aynı modeli kullanır)
+	UEMinDist      = 10.0  // kullanıcının servis BS'ine minimum uzaklığı (m)
+	UEMaxDist      = 100.0 // kullanıcının servis BS'ine maksimum uzaklığı (m)
+	MaxSINR        = 1e3   // ~30 dB SINR tavanı (pratik alıcı sınırı)
+	MaxSpectralEff = 8.0   // bps/Hz (≈ 256-QAM pratik üst sınırı)
+)
+
 // --- ALGORİTMA SABİTLERİ ---
 const (
 	MaxColors = 5 // K: ortogonal renk / PRB sayısı (tüm dosyalarda tek kaynak)

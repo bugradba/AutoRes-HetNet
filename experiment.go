@@ -43,7 +43,7 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 			// Eşik değer kontrolü (Menzil dışındaysa hesaplama yapma)
 			if dist < threshold {
 				baseWeight := ReferenceLoss * math.Pow(dist, -PathLossExponent)
-				shadowing := math.Exp(rng.NormFloat64() * 0.5)
+				shadowing := lognormalShadow(rng) // PHY ile aynı gölgeleme modeli (σ tek kaynaktan)
 				finalWeight := baseWeight * shadowing
 
 				net[i].NeighborWeights[net[j].ID] = finalWeight
@@ -197,6 +197,13 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	fmt.Printf("--- MONTE CARLO: %d koşu (baseSeed=%d, N=%d, Alan=%.0fm, Eşik=%.0fm, K=%d) ---\n\n",
 		runs, baseSeed, SimN, SimAreaSize, SimThreshold, MaxColors)
 
+	type schemeAgg struct{ cost, thr, fair []float64 }
+	schemeNames := []string{"Dağıtık (NE)", "Greedy", "DSATUR", "Sabit reuse", "Rastgele"}
+	cmp := map[string]*schemeAgg{}
+	for _, nm := range schemeNames {
+		cmp[nm] = &schemeAgg{}
+	}
+
 	var (
 		convTimes  []float64 // yalnızca yakınsayan koşular
 		commFracs  []float64
@@ -218,21 +225,52 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 
 		convSec, converged := RunSimulation(net, 20*time.Second)
 
-		// Metrikler (NOT: CalculateShannonCapacity hâlâ Hata 4 & 5'i
-		// içeriyor — FAILED istasyon şişirmesi ve zayıf SINR modeli.
-		// Bu metriklerin mutlak değerleri o düzeltmelere kadar temkinli okunmalı.)
-		total := 0.0
-		for _, bs := range net {
-			bs.CalculateShannonCapacity(net)
-			total += bs.Throughput
+		// HATA 6 DÜZELTMESİ: kanal (UE konumları + tüm gölgelemeler) koşu
+		// başına BİR KEZ çekilir; dağıtık NE ve tüm baseline şemalar AYNI
+		// gerçekleme üzerinde değerlendirilir. Şemalar arası fairness/hız
+		// farkı böylece tahsis kararına izole edilir.
+		ch := DrawChannel(net, rng)
+
+		neAssign, neServed := NEAssignment(net)
+		thrNE := ComputeThroughputs(net, neAssign, neServed, ch)
+
+		allServed := make([]bool, len(net))
+		for i := range allServed {
+			allServed[i] = true
 		}
-		avgCap := total / float64(len(net))
-		fair := CalculateJainsFairness(net)
+		schemes := []struct {
+			name   string
+			assign []PRB
+			served []bool
+		}{
+			{"Dağıtık (NE)", neAssign, neServed},
+			{"Greedy", GreedyAssignment(net), allServed},
+			{"DSATUR", DSATURAssignment(net), allServed},
+			{"Sabit reuse", FixedReuseAssignment(net, MaxColors), allServed},
+			{"Rastgele", RandomAssignment(net, MaxColors, rng), allServed},
+		}
+		for s, sc := range schemes {
+			var thr []float64
+			if s == 0 {
+				thr = thrNE
+			} else {
+				thr = ComputeThroughputs(net, sc.assign, sc.served, ch)
+			}
+			cmp[sc.name].cost = append(cmp[sc.name].cost, AssignmentCost(net, sc.assign))
+			cmp[sc.name].thr = append(cmp[sc.name].thr, meanServed(thr, sc.served))
+			cmp[sc.name].fair = append(cmp[sc.name].fair, JainOf(thr))
+		}
+
+		// HATA 4 DÜZELTMESİ: ortalama, hizmet veren (COMMITTED) istasyon
+		// başına hesaplanır; FAILED istasyonlar 0 Mbps'tir ve paydaya girmez.
+		committed := CommittedCount(net)
+		avgCap := meanServed(thrNE, neServed)
+		fair := JainOf(thrNE)
 		obj := CalculateGlobalObjective(net)
 		greedy := CalculateGreedyBaseline(net)
 		opt := BruteForceOptimum(net, MaxColors, optBudget)
 
-		commFrac := float64(CommittedCount(net)) / float64(len(net))
+		commFrac := float64(committed) / float64(len(net))
 		commFracs = append(commFracs, commFrac)
 		interfs = append(interfs, obj)
 		avgCaps = append(avgCaps, avgCap)
@@ -281,7 +319,7 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	reportStat("Toplam girişim (W)", interfs)
 	reportStat("Gain over Greedy", gains)
 	reportStat("Empirik PoA alt sınırı", poas)
-	reportStat("Ort. kullanıcı hızı (Mbps)*", avgCaps)
+	reportStat("Ort. hız / COMMITTED (Mbps)*", avgCaps)
 	reportStat("Jain fairness*", fairs)
 	fmt.Printf("\nYakınsayan koşu                 : %d/%d (%.0f%%)\n", convCount, runs, 100*float64(convCount)/float64(runs))
 	fmt.Printf("Girişimi ~0 olan koşu           : %d/%d (%.0f%%)  <-- \"0.0000\" iddiasının dürüst hali\n", zeroInterf, runs, 100*float64(zeroInterf)/float64(runs))
@@ -289,6 +327,32 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	if optZeroNE > 0 {
 		fmt.Printf("OPT=0 iken NE>0 kalan koşu      : %d (PoA bu örneklerde sonsuz)\n", optZeroNE)
 	}
-	fmt.Println("\n* Hata 4 & 5 (throughput bug'ı, SINR modeli) düzeltilene kadar")
-	fmt.Println("  kapasite/fairness değerleri temkinli yorumlanmalıdır.")
+	fmt.Println("\n--- BASELINE KARŞILAŞTIRMASI (koşu başına AYNI topoloji + AYNI kanal) ---")
+	fmt.Println("Kanal donmuş olduğundan sütunlar arası fark tahsis yönteminden kaynaklanır.")
+	fmt.Printf("%-14s | %-22s | %-18s | %s\n", "Şema", "Maliyet (ort ± GA)", "Mbps/served", "Jain")
+	for _, nm := range schemeNames {
+		a := cmp[nm]
+		fmt.Printf("%-14s | %10.3e ± %.2e | %7.1f ± %5.1f | %.3f ± %.3f\n",
+			nm, mean(a.cost), ci95Half(a.cost), mean(a.thr), ci95Half(a.thr), mean(a.fair), ci95Half(a.fair))
+	}
+
+	fmt.Println("\n* Jain indeksi buradaki hız dağılımını BETİMLER; algoritma fairness'i")
+	fmt.Println("  doğrudan optimize etmez ve değer kullanıcı yerleşiminin")
+	fmt.Println("  stokastikliğini de içerir (bkz. Hata 6).")
+}
+
+// meanServed: yalnızca hizmetteki istasyonlar üzerinden ortalama hız
+// (Hata 4: FAILED istasyonlar 0 Mbps'tir ve paydaya girmez).
+func meanServed(thr []float64, served []bool) float64 {
+	sum, n := 0.0, 0
+	for i, x := range thr {
+		if served[i] {
+			sum += x
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return sum / float64(n)
 }

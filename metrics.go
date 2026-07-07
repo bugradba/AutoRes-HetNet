@@ -11,23 +11,26 @@ func Distance(a, b *BaseStation) float64 { //MESAFE HESABI
 //  Jain's Fairness Index Fonksiyonu
 // Formül: (Toplam x)^2 / (n * Toplam x^2)
 
-func CalculateJainsFairness(network []*BaseStation) float64 {
-	var sumThroughput float64
-	var sumSquareThroughput float64
-	n := float64(len(network))
-
-	for _, bs := range network {
-		xi := bs.Throughput
-		sumThroughput += xi
-		sumSquareThroughput += (xi * xi)
+// JainOf: herhangi bir hız vektörü için Jain indeksi. Baseline
+// karşılaştırmasında şemaların hız vektörleri doğrudan buna verilir.
+func JainOf(xs []float64) float64 {
+	var sum, sumSq float64
+	for _, x := range xs {
+		sum += x
+		sumSq += x * x
 	}
-
-	if sumSquareThroughput == 0 {
+	if sumSq == 0 {
 		return 0
 	}
+	return (sum * sum) / (float64(len(xs)) * sumSq)
+}
 
-	jainsIndex := (sumThroughput * sumThroughput) / (n * sumSquareThroughput)
-	return jainsIndex
+func CalculateJainsFairness(network []*BaseStation) float64 {
+	xs := make([]float64, len(network))
+	for i, bs := range network {
+		xs[i] = bs.Throughput
+	}
+	return JainOf(xs)
 }
 
 // GLOBAL AMAÇ FONKSİYONU (Total Network Interference)
@@ -67,75 +70,9 @@ func CalculateGlobalObjective(network []*BaseStation) float64 {
 // "Price of Anarchy" DEĞİLDİR; doğru adı "Gain over Greedy"dir.
 // Gerçek optimum için optimum.go içindeki BruteForceOptimum'a bakınız.
 //
-// Yöntem: İstasyonları "Zorluk Derecesine" göre sırala (toplam komşu ağırlığı),
-// en zor istasyondan başlayarak o an en az ceza getiren rengi ata.
-// (Basit bir Bubble Sort yapıyoruz, node sayısı az olduğu için yeterli)
-
+// Uygulama artık baselines.go'daki ortak altyapıyı kullanır:
+// atama GreedyAssignment ile üretilir, maliyet tüm şemalarla AYNI
+// tanımı kullanan AssignmentCost ile hesaplanır (tanım farkı riski yok).
 func CalculateGreedyBaseline(network []*BaseStation) float64 {
-	// Mevcut simülasyonu bozmamak için geçici bir renk haritası oluşturuyoruz
-	tempColors := make(map[Agent_ID]PRB)
-	for _, bs := range network {
-		tempColors[bs.ID] = -1 // Önce herkes renksiz
-	}
-
-	sortedNodes := make([]*BaseStation, len(network))
-	copy(sortedNodes, network)
-
-	for i := 0; i < len(sortedNodes); i++ {
-		for j := 0; j < len(sortedNodes)-i-1; j++ {
-			// Komşu sayısı * Ağırlık toplamı mantığıyla "zorluk" ölçelim
-			weightI := 0.0
-			for _, w := range sortedNodes[j].NeighborWeights {
-				weightI += w
-			}
-
-			weightJ := 0.0
-			for _, w := range sortedNodes[j+1].NeighborWeights {
-				weightJ += w
-			}
-
-			if weightI < weightJ { // Büyükten küçüğe sırala
-				sortedNodes[j], sortedNodes[j+1] = sortedNodes[j+1], sortedNodes[j]
-			}
-		}
-	}
-
-	// Merkezi Zeka ile Renk Dağıt (Greedy Optimization)
-
-	for _, bs := range sortedNodes {
-		bestColor := PRB(0)
-		minGlobalImpact := math.MaxFloat64
-
-		for c := PRB(0); c < MaxColors; c++ {
-			currentImpact := 0.0
-
-			for neighborID, weight := range bs.NeighborWeights {
-				if assignedColor, exists := tempColors[neighborID]; exists && assignedColor != -1 {
-					if assignedColor == c {
-						currentImpact += weight
-					}
-				}
-			}
-
-			if currentImpact < minGlobalImpact {
-				minGlobalImpact = currentImpact
-				bestColor = c
-			}
-		}
-		tempColors[bs.ID] = bestColor
-	}
-
-	// Bu greedy dağıtımın toplam maliyetini hesapla (optimum olduğu garanti DEĞİL)
-	totalCentralizedCost := 0.0
-	for _, bs := range network {
-		myColor := tempColors[bs.ID]
-		for neighborID, weight := range bs.NeighborWeights {
-			neighborColor := tempColors[neighborID]
-			if myColor == neighborColor {
-				totalCentralizedCost += weight
-			}
-		}
-	}
-
-	return totalCentralizedCost / 2.0
+	return AssignmentCost(network, GreedyAssignment(network))
 }

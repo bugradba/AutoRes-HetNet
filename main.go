@@ -14,7 +14,6 @@ func main() {
 	// HATA 3 DÜZELTMESİ: varsayılan mod artık Monte Carlo.
 	// Tek bir stokastik koşu temsil edici olmadığı için sayılar
 	// yalnızca çok-koşulu ortalama ± güven aralığı olarak savunulabilir.
-
 	runs := flag.Int("runs", 100, "Monte Carlo koşu sayısı (1 = eski tarz ayrıntılı tek koşu)")
 	seed := flag.Int64("seed", 42, "temel tohum; koşu r'nin tohumu = seed + r (tekrarlanabilirlik)")
 	verbose := flag.Bool("v", false, "ajan mesajlarını yazdır (yalnızca -runs 1 için önerilir)")
@@ -59,12 +58,12 @@ func main() {
 
 	fmt.Println("\n--- CALCULATING NETWORK THROUGHPUT (SHANNON CAPACITY) ---")
 
+	// Donmuş kanal çek + NE'yi değerlendir (bs.Throughput doldurulur).
+	_ = EvaluateNetworkThroughput(Network, rng)
+
 	totalNetworkCapacity := 0.0
-
 	for _, bs := range Network {
-		bs.CalculateShannonCapacity(Network) // Hesapla ve Struct'a kaydet
 		totalNetworkCapacity += bs.Throughput
-
 		fmt.Printf("BS-%d | Color: %d | Throughput: %.2f Mbps\n", bs.ID, bs.CurrentPRB, bs.Throughput)
 	}
 
@@ -73,7 +72,15 @@ func main() {
 
 	fmt.Printf("\n>>> SYSTEM PERFORMANCE RESULTS V1 <<<\n")
 	fmt.Printf("1. Total Network Capacity : %.2f Mbps (Higher is better)\n", totalNetworkCapacity)
-	fmt.Printf("2. Average User Speed     : %.2f Mbps\n", totalNetworkCapacity/float64(numDevice))
+	// HATA 4 DÜZELTMESİ: FAILED istasyonlar 0 Mbps'tir (hizmet dışı);
+	// ortalama, hizmet veren istasyon başına raporlanır.
+	committedN := CommittedCount(Network)
+	if committedN > 0 {
+		fmt.Printf("2. Avg Speed per COMMITTED: %.2f Mbps (%d/%d istasyon hizmette)\n",
+			totalNetworkCapacity/float64(committedN), committedN, numDevice)
+	} else {
+		fmt.Printf("2. Avg Speed per COMMITTED: 0.00 Mbps (hiçbir istasyon COMMITTED olamadı)\n")
+	}
 
 	fmt.Println("------------------------------------------------------------------")
 	fmt.Printf("\n>>> SYSTEM PERFORMANCE V2 <<<\n")
