@@ -7,19 +7,17 @@ import (
 )
 
 // ============================================================
-// YAKINSAMA TARAMASI (yol haritası madde 4 — projenin asıl özgün katkısı)
-//
-// Soru: asenkron, mesaj-tabanlı en iyi tepki dinamiği K (renk sayısı)
-// ve düğüm yoğunluğu (N, sabit alanda) ile nasıl ölçeklenir?
+// YAKINSAMA TARAMASI (K × N ızgarası) — projenin asıl katkısının
+// (asenkron protokolün yakınsama davranışı) sistematik ölçümü.
 //
 // Her (K, N) hücresi için 'runsPer' bağımsız koşu yapılır ve şunlar
-// ölçülür: yakınsama oranı ve süresi (protokol turu cinsinden — sabit
+// ölçülür: yakınsama oranı ve süresi (PROTOKOL TURU cinsinden — sabit
 // zamanlayıcıların duvar saatini domine etmesi sorununu aşar), mesaj
 // karmaşıklığı (istasyon başına), CONFLICT ve düşen mesaj sayıları,
 // sıfır-girişim oranı (K'nin kromatik sayıya yetip yetmediğinin izi).
 //
 // Ham koşu verileri CSV'ye yazılır; makaledeki yakınsama-süresi
-// CDF'leri doğrudan bu dosyadan çizilir.
+// CDF'leri doğrudan bu dosyadan çizilir (plot_sweep.py).
 //
 // NOT: Tarama, -timescale ile küçültülmüş zamanlayıcılarla çalıştırılmak
 // üzere tasarlandı (örn. 0.1). Zamanlayıcı ORANLARI korunduğundan
@@ -28,16 +26,10 @@ import (
 // ============================================================
 
 func RunSweep(runsPer int, baseSeed int64, csvPath string, Ks, Ns []int) {
-	if len(Ks) == 0 {
-		Ks = []int{3, 4, 5, 6}
-	}
-	if len(Ns) == 0 {
-		Ns = []int{20, 40, 60, 80}
-	}
-
 	f, err := os.Create(csvPath)
 	if err != nil {
 		fmt.Printf("CSV açılamadı (%v); yalnızca özet basılacak.\n", err)
+		f = nil
 	} else {
 		defer f.Close()
 		fmt.Fprintln(f, "K,N,run,seed,converged,conv_sec,conv_rounds,committed_frac,avg_degree,msgs_per_bs,proposes,conflicts,dropped,interference,zero_interf,avg_mbps_served,jain")
@@ -99,28 +91,23 @@ func RunSweep(runsPer int, baseSeed int64, csvPath string, Ks, Ns []int) {
 				drops = append(drops, float64(ms.Dropped))
 
 				if f != nil {
-					fmt.Fprintf(f, "%d,%d,%d,%d,%v,%.4f,%.2f,%.4f,%.2f,%.2f,%d,%d,%d,%.6e,%v,%.2f,%.4f\n",
+					fmt.Fprintf(f, "%d,%d,%d,%d,%t,%.4f,%.3f,%.4f,%.3f,%.3f,%d,%d,%d,%.6e,%t,%.3f,%.4f\n",
 						K, N, r, seed, converged, convSec, convR, commFrac, avgDeg,
 						perBS, ms.Proposes, ms.Conflicts, ms.Dropped, obj, zero, avgMbps, jain)
 				}
 			}
 
-			fmt.Printf("%-4d %-4d | %6.0f%%  | %6.1f ± %-6.1f | %5.1f ± %-4.1f | %5.0f ± %-4.0f | %6.0f | %.0f%%\n",
-				K, N,
-				100*float64(convCount)/float64(runsPer),
+			fmt.Printf("%-4d %-4d | %6.0f%%  | %6.2f ± %-6.2f | %5.1f ± %-4.1f | %8.1f | %6.1f | %.0f%%\n",
+				K, N, 100*float64(convCount)/float64(runsPer),
 				mean(rounds), ci95Half(rounds),
 				mean(msgs), ci95Half(msgs),
-				mean(cnfs), ci95Half(cnfs),
-				mean(drops),
+				mean(cnfs), mean(drops),
 				100*float64(zeroCount)/float64(runsPer))
 			cfg++
 		}
 	}
 
 	if f != nil {
-		fmt.Printf("\nHam koşu verileri: %s (yakınsama-süresi CDF'leri bu dosyadan çizilir)\n", csvPath)
+		fmt.Printf("\nHam koşu verileri yazıldı: %s (CDF'ler için: python plot_sweep.py %s sweep)\n", csvPath, csvPath)
 	}
-	fmt.Println("Okuma rehberi: conv%% < 100 => protokol o yoğunlukta üst sınıra takılıyor;")
-	fmt.Println("sıfır-girişim%% => K'nin graf kromatik sayısına yetme olasılığının izi;")
-	fmt.Println("CONFLICT ve tur sayısının N ile büyümesi => çekişme çözümünün ölçeklenme maliyeti.")
 }

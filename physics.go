@@ -11,27 +11,35 @@ import (
 //
 //	SINR_i = S_i / ( Σ_j I_j + N0·B )
 //
-//	S_i : servis BS'ten UE'ye gelen güç             = Ptx · G0 · d_iU^-α · χ_i
-//	I_j : aynı PRB'yi kullanan, hizmetteki komşu j'den
-//	      UE'ye gelen güç                           = Ptx · G0 · d_jU^-α · χ_ij
+//	S_i : servis BS'ten UE'ye gelen güç              = Ptx · G0 · d_iU^-α · χ_i
+//	I_j : aynı PRB'yi kullanan, HİZMETTEKİ komşu j'den
+//	      UE'ye gelen güç                            = Ptx · G0 · d_jU^-α · χ_ij
 //
-// HATA 5 DÜZELTMELERİ (önceki adımdan):
-//  (1) Girişim, komşu BS'ten KULLANICIYA olan gerçek geometrik mesafeden.
-//  (2) Servis linkinde de log-normal gölgeleme (simetri).
-//  (3) SINR ≤ ~30 dB ve SE ≤ 8 bps/Hz tavanları.
+// HATA 4 DÜZELTMELERİ:
+//  (1) COMMITTED olamayan (FAILED) istasyon yayında değildir: kullanıcısı
+//      0 Mbps alır ve ortalamayı ŞİŞİRMEZ (eskiden girişimsiz sayılıp
+//      en yüksek hızı alıyordu).
+//  (2) FAILED komşu yayın yapamayacağı için girişim de ÜRETEMEZ.
+//
+// HATA 5 DÜZELTMELERİ:
+//  (1) Girişim, komşu BS'ten KULLANICIYA olan gerçek geometrik mesafeden
+//      hesaplanır (eskiden BS-BS link ağırlığı kullanılıyordu).
+//  (2) Servis linkinde de log-normal gölgeleme vardır (simetri).
+//  (3) SINR ≤ ~30 dB ve SE ≤ 8 bps/Hz tavanları (fiziksel gerçekçilik;
+//      eski model 500 Mbps'e varan tavansız hızlar üretebiliyordu).
+//  (4) RNG artık PARAMETRE: time.Now() tohumu kaldırıldı, -seed verildiğinde
+//      throughput/fairness de tekrarlanabilir.
+//  (5) Eski "cell shrinkage" (girişim arttıkça kullanıcıyı BS'e yaklaştırma)
+//      kaldırıldı: kötü tahsisin cezasını modelden silen ters nedensellikti.
 //
 // HATA 6 DÜZELTMESİ — DONMUŞ KANAL GERÇEKLEMESİ:
-// Jain indeksi throughput üzerinden hesaplanınca, throughput'u domine eden
-// rastgele kullanıcı mesafesi indeksi ele geçiriyordu: fairness, algoritmayı
-// değil kullanıcı yerleşiminin şansını ölçüyordu. Çözüm: kanalın TÜM
-// stokastik bileşenleri (UE konumları, servis gölgelemesi, her komşu link
-// için girişim gölgelemesi) koşu başına BİR KEZ çekilir (DrawChannel) ve
-// bütün tahsis şemaları (dağıtık NE, greedy, DSATUR, sabit reuse, rastgele)
-// AYNI gerçekleme üzerinde değerlendirilir (ComputeThroughputs). Böylece
-// şemalar arasındaki fairness/hız FARKI yalnızca tahsis kararından
-// kaynaklanır; kullanıcı yerleşiminin rastgeleliği ortak paydada sadeleşir.
-// Fiziksel yorum da doğrudur: kanal neyse odur; tahsis yalnızca "kim
-// kiminle girişir"i belirler.
+// Kanalın TÜM stokastik bileşenleri (UE konumları, servis gölgelemesi,
+// her komşu link için girişim gölgelemesi) koşu başına BİR KEZ çekilir
+// (DrawChannel) ve bütün tahsis şemaları (dağıtık NE, greedy, DSATUR,
+// sabit reuse, rastgele) AYNI gerçekleme üzerinde değerlendirilir
+// (ComputeThroughputs). Böylece şemalar arasındaki fairness/hız FARKI
+// yalnızca tahsis kararından kaynaklanır; kullanıcı yerleşiminin şansı
+// ortak paydada sadeleşir.
 
 // Channel: bir koşunun donmuş kanal gerçeklemesi (ağ dizisi sırasıyla indeksli).
 type Channel struct {
@@ -53,6 +61,15 @@ func pathGain(d float64) float64 {
 		d = 1.0 // referans mesafenin altına inme
 	}
 	return ReferenceLoss * math.Pow(d, -PathLossExponent)
+}
+
+// indexOf: Agent_ID -> ağ dizisi indeksi.
+func indexOf(network []*BaseStation) map[Agent_ID]int {
+	idx := make(map[Agent_ID]int, len(network))
+	for i, bs := range network {
+		idx[bs.ID] = i
+	}
+	return idx
 }
 
 // DrawChannel: koşunun tüm kanal rastgeleliğini BİR KEZ çeker.

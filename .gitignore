@@ -1,0 +1,12 @@
+# IDE
+.idea/
+.vscode/
+
+# Üretilen çıktılar (kod değil, veri)
+viz_data.json
+sweep_results.csv
+*.png
+
+# Derleme
+*.exe
+/sim

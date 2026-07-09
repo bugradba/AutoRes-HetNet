@@ -2,17 +2,14 @@ package main
 
 import "math"
 
-// ------------- Yardımcı olacak fonksiyonlarr -------------
+// ------------- Yardımcı metrik fonksiyonları -------------
 
-func Distance(a, b *BaseStation) float64 { //MESAFE HESABI
-	return math.Sqrt(math.Pow(a.X-b.X, 2) + math.Pow(a.Y-b.Y, 2))
+func Distance(a, b *BaseStation) float64 {
+	return math.Hypot(a.X-b.X, a.Y-b.Y)
 }
 
-//  Jain's Fairness Index Fonksiyonu
-// Formül: (Toplam x)^2 / (n * Toplam x^2)
-
-// JainOf: herhangi bir hız vektörü için Jain indeksi. Baseline
-// karşılaştırmasında şemaların hız vektörleri doğrudan buna verilir.
+// JainOf: Jain's Fairness Index — (Σx)² / (n·Σx²).
+// Baseline karşılaştırmasında şemaların hız vektörleri doğrudan buna verilir.
 func JainOf(xs []float64) float64 {
 	var sum, sumSq float64
 	for _, x := range xs {
@@ -33,34 +30,15 @@ func CalculateJainsFairness(network []*BaseStation) float64 {
 	return JainOf(xs)
 }
 
-// GLOBAL AMAÇ FONKSİYONU (Total Network Interference)
-// Tüm ağdaki toplam çatışma maliyetini hesaplar.
-// Hedef: Bu değerin simülasyon sonunda azalmış olmasıdır.
-
+// GLOBAL AMAÇ FONKSİYONU (toplam ağ çakışma maliyeti).
+// Artık ortak AssignmentCost tanımının ince bir sarmalayıcısıdır:
+// dağıtık NE ile bütün baseline'lar AYNI maliyet tanımını paylaşır.
 func CalculateGlobalObjective(network []*BaseStation) float64 {
-	totalCost := 0.0
-
-	for _, bs := range network {
-		if bs.CurrentPRB == -1 {
-			continue
-		}
-
-		for neighborID, weight := range bs.NeighborWeights {
-			var neighborColor PRB = -1
-			for _, node := range network {
-				if node.ID == neighborID {
-					neighborColor = node.CurrentPRB
-					break
-				}
-			}
-
-			if neighborColor != -1 && bs.CurrentPRB == neighborColor {
-				totalCost += weight
-			}
-		}
+	assign := make([]PRB, len(network))
+	for i, bs := range network {
+		assign[i] = bs.CurrentPRB
 	}
-
-	return totalCost / 2.0
+	return AssignmentCost(network, assign)
 }
 
 // MERKEZİ GREEDY REFERANS (BASELINE) HESAPLAYICISI
@@ -70,9 +48,9 @@ func CalculateGlobalObjective(network []*BaseStation) float64 {
 // "Price of Anarchy" DEĞİLDİR; doğru adı "Gain over Greedy"dir.
 // Gerçek optimum için optimum.go içindeki BruteForceOptimum'a bakınız.
 //
-// Uygulama artık baselines.go'daki ortak altyapıyı kullanır:
-// atama GreedyAssignment ile üretilir, maliyet tüm şemalarla AYNI
-// tanımı kullanan AssignmentCost ile hesaplanır (tanım farkı riski yok).
+// Uygulama, baselines.go'daki ortak altyapıyı kullanır: atama
+// GreedyAssignment ile üretilir, maliyet tüm şemalarla AYNI tanımı
+// kullanan AssignmentCost ile hesaplanır (tanım farkı riski yok).
 func CalculateGreedyBaseline(network []*BaseStation) float64 {
 	return AssignmentCost(network, GreedyAssignment(network))
 }

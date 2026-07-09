@@ -5,31 +5,19 @@ import (
 	"math"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ============================================================
-// HATA 3 DÜZELTMESİ: Monte Carlo + Güven Aralığı
-//
-// Eski tasarımın iki kusuru vardı:
-//   1. Tüm metrikler TEK bir koşudan raporlanıyordu. Sistem stokastik
-//      (rastgele konum + shadowing + asenkron mesaj yarışları) olduğu
-//      için her koşu farklı sonuç verir; tek örnek temsil edici değildir.
-//   2. Koşu, duvar saatiyle (sabit 15 s) bitiyordu. Bu mantıksal bir
-//      yakınsama koşulu değildir: bazı istasyonlar FAILED kalabilir ve
-//      projenin asıl katkısı olan "yakınsama süresi" hiç ölçülemez.
-//
-// Bu dosya ikisini de düzeltir:
-//   - BuildNetwork: tohumlu rng ile TEKRARLANABİLİR topoloji kurar.
-//   - RunSimulation: sabit süre yerine "tüm istasyonlar COMMITTED"
-//     mantıksal koşulunu bekler (güvenlik için üst süre sınırıyla)
-//     ve yakınsama süresini ölçer.
-//   - RunMonteCarlo: koşuları tekrarlar, her metrik için
-//     ortalama ± %95 güven aralığı (mean ± 1.96·σ/√n) raporlar.
+// HATA 3 DÜZELTMESİ: Monte Carlo + güven aralığı.
+// Tek bir stokastik koşu temsil edici değildir; koşu, duvar saatiyle
+// değil MANTIKSAL yakınsamayla ("tüm istasyonlar COMMITTED") biter.
+// HATA 6 DÜZELTMESİ: her koşuda kanal bir kez çekilir; dağıtık NE ve
+// tüm baseline şemalar AYNI donmuş gerçekleme üzerinde karşılaştırılır.
 // ============================================================
 
-// BuildNetwork: eski main() içindeki topoloji kurulumunun, tohumlu
-// rng kullanan tekrarlanabilir hali. Aynı seed => aynı topoloji.
+// BuildNetwork: tohumlu rng ile TEKRARLANABİLİR topoloji kurar.
 func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bool) []*BaseStation {
 	net := make([]*BaseStation, n)
 	for i := 0; i < n; i++ {
@@ -39,11 +27,9 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			dist := Distance(net[i], net[j])
-
-			// Eşik değer kontrolü (Menzil dışındaysa hesaplama yapma)
 			if dist < threshold {
 				baseWeight := ReferenceLoss * math.Pow(dist, -PathLossExponent)
-				shadowing := lognormalShadow(rng) // PHY ile aynı gölgeleme modeli (σ tek kaynaktan)
+				shadowing := math.Exp(rng.NormFloat64() * ShadowSigma)
 				finalWeight := baseWeight * shadowing
 
 				net[i].NeighborWeights[net[j].ID] = finalWeight
@@ -65,8 +51,7 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 	return net
 }
 
-// AllCommitted: tüm istasyonlar COMMITTED mi? (Mutex ile güvenli okuma;
-// ajan goroutine'leri hâlâ çalışırken çağrılır.)
+// AllCommitted: tüm istasyonlar COMMITTED mi? (Mutex ile güvenli okuma.)
 func AllCommitted(net []*BaseStation) bool {
 	for _, bs := range net {
 		bs.Mutex.Lock()
@@ -105,11 +90,13 @@ func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, 
 		go bs.Start(&wg)
 	}
 
-	deadline := start.Add(maxWait)
-	poll := ThinkPeriod / 10 // yoklama, protokol turuna oranlı (ölçekle birlikte küçülür)
-	if poll < 5*time.Millisecond {
-		poll = 5 * time.Millisecond
+	// Yoklama aralığı zaman ölçeğiyle uyumlu (ThinkPeriod/10, min 1 ms).
+	poll := ThinkPeriod / 10
+	if poll < time.Millisecond {
+		poll = time.Millisecond
 	}
+
+	deadline := start.Add(maxWait)
 	for {
 		time.Sleep(poll)
 		if AllCommitted(net) {
@@ -127,12 +114,35 @@ func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, 
 	}
 	wg.Wait()
 
-	// Yakınsamadan bittiyse: Think() içindeki commit zamanlayıcıları hâlâ
-	// bekliyor olabilir; metrikleri yarışsız okumak için süre tanı.
+	// Yakınsamadan bittiyse: bekleyen commit zamanlayıcıları hâlâ
+	// çalışıyor olabilir; metrikleri yarışsız okumak için süre tanı.
 	if !converged {
 		time.Sleep(CommitTimeout + 200*time.Millisecond)
 	}
 	return convSec, converged
+}
+
+// ------------------- MESAJ İSTATİSTİKLERİ -------------------
+
+// MessageStats: bir koşunun toplam mesaj sayaçları.
+// Total = kuyruğa giren tüm mesajlar + düşenler.
+type MessageStats struct {
+	Hellos, Proposes, Successes, Conflicts int64
+	Dropped                                int64
+	Total                                  int64
+}
+
+func CollectMessageStats(net []*BaseStation) MessageStats {
+	var ms MessageStats
+	for _, bs := range net {
+		ms.Hellos += atomic.LoadInt64(&bs.MsgSent[MSG_HELLO])
+		ms.Proposes += atomic.LoadInt64(&bs.MsgSent[MSG_PROPOSE])
+		ms.Successes += atomic.LoadInt64(&bs.MsgSent[MSG_SUCCESS])
+		ms.Conflicts += atomic.LoadInt64(&bs.MsgSent[MSG_CONFLICT])
+		ms.Dropped += atomic.LoadInt64(&bs.MsgDropped)
+	}
+	ms.Total = ms.Hellos + ms.Proposes + ms.Successes + ms.Conflicts + ms.Dropped
+	return ms
 }
 
 // ------------------- İSTATİSTİK YARDIMCILARI -------------------
@@ -166,7 +176,7 @@ func stdDev(xs []float64) float64 {
 func ci95Half(xs []float64) float64 {
 	n := len(xs)
 	if n < 2 {
-		return math.NaN()
+		return 0 // tek örneklemde GA tanımsız; NaN yerine 0 bas (kozmetik)
 	}
 	return 1.96 * stdDev(xs) / math.Sqrt(float64(n))
 }
@@ -189,40 +199,56 @@ func reportStat(name string, xs []float64) {
 		name, mean(xs), ci95Half(xs), lo, hi, len(xs))
 }
 
+// meanServed: yalnızca hizmetteki (served) istasyonlar üzerinden ortalama.
+// HATA 4: FAILED istasyon 0 Mbps'tir ve paydaya GİRMEZ.
+func meanServed(thr []float64, served []bool) float64 {
+	s, n := 0.0, 0
+	for i, x := range thr {
+		if served[i] {
+			s += x
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return s / float64(n)
+}
+
 // ------------------- MONTE CARLO ÇEKİRDEĞİ -------------------
 
-// RunMonteCarlo: 'runs' adet bağımsız koşu yapar. Her koşuda:
-//
-//	seed = baseSeed + r  =>  topoloji tekrarlanabilir
-//
-// (Asenkron mesaj yarışları doğası gereği deterministik değildir;
-// bu, ölçmek İSTEDİĞİMİZ stokastikliğin bir parçasıdır.)
+type schemeAgg struct {
+	cost, thr, fair []float64
+}
+
+// RunMonteCarlo: 'runs' adet bağımsız koşu. Her koşuda seed = baseSeed + r
+// => topoloji ve kanal tekrarlanabilir. (Asenkron mesaj yarışları doğası
+// gereği deterministik değildir; bu, ölçmek İSTEDİĞİMİZ stokastikliğin
+// bir parçasıdır.)
 func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	fmt.Printf("--- MONTE CARLO: %d koşu (baseSeed=%d, N=%d, Alan=%.0fm, Eşik=%.0fm, K=%d) ---\n\n",
 		runs, baseSeed, SimN, SimAreaSize, SimThreshold, MaxColors)
 
-	type schemeAgg struct{ cost, thr, fair []float64 }
 	schemeNames := []string{"Dağıtık (NE)", "Greedy", "DSATUR", "Sabit reuse", "Rastgele"}
 	cmp := map[string]*schemeAgg{}
-	for _, nm := range schemeNames {
-		cmp[nm] = &schemeAgg{}
+	for _, n := range schemeNames {
+		cmp[n] = &schemeAgg{}
 	}
 
 	var (
-		convTimes  []float64 // yalnızca yakınsayan koşular
-		convRounds []float64 // yakınsama, protokol turu (ThinkPeriod) cinsinden
-		msgsPerBS  []float64 // istasyon başına toplam mesaj
-		conflicts  []float64 // toplam CONFLICT sayısı
+		convRounds []float64 // yalnızca yakınsayan koşular (protokol turu)
 		commFracs  []float64
 		interfs    []float64
 		gains      []float64 // gain over greedy (tanımlı olanlar)
-		poas       []float64 // empirik PoA (yalnızca optimum kanıtlananlar ve OPT>0)
+		poas       []float64 // empirik PoA alt sınırı
+		msgPerBS   []float64
+		drops      []float64
 		avgCaps    []float64
 		fairs      []float64
-		zeroInterf int // girişimi ~0 olan koşu sayısı ("0.0000" iddiasının dürüst hali)
+		zeroInterf int
 		convCount  int
 		optProven  int
-		optZeroNE  int // optimum 0 iken NE>0 kalan koşular (PoA=+Inf örnekleri)
+		optZeroNE  int // OPT=0 iken NE>0 kalan koşular (PoA=+Inf örnekleri)
 	)
 	const eps = 1e-15
 
@@ -230,16 +256,16 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		rng := rand.New(rand.NewSource(baseSeed + int64(r)))
 		net := BuildNetwork(rng, SimN, SimAreaSize, SimThreshold, false)
 
-		convSec, converged := RunSimulation(net, 20*time.Second)
+		convSec, converged := RunSimulation(net, 40*ThinkPeriod)
+		convR := convSec / ThinkPeriod.Seconds()
 
-		// HATA 6 DÜZELTMESİ: kanal (UE konumları + tüm gölgelemeler) koşu
-		// başına BİR KEZ çekilir; dağıtık NE ve tüm baseline şemalar AYNI
-		// gerçekleme üzerinde değerlendirilir. Şemalar arası fairness/hız
-		// farkı böylece tahsis kararına izole edilir.
+		// HATA 6: kanal bir kez çekilir; beş şema aynı gerçeklemede.
 		ch := DrawChannel(net, rng)
-
 		neAssign, neServed := NEAssignment(net)
 		thrNE := ComputeThroughputs(net, neAssign, neServed, ch)
+		for i, bs := range net {
+			bs.Throughput = thrNE[i] // tekil koşu uyumluluğu
+		}
 
 		allServed := make([]bool, len(net))
 		for i := range allServed {
@@ -249,18 +275,17 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 			name   string
 			assign []PRB
 			served []bool
+			thr    []float64
 		}{
-			{"Dağıtık (NE)", neAssign, neServed},
-			{"Greedy", GreedyAssignment(net), allServed},
-			{"DSATUR", DSATURAssignment(net), allServed},
-			{"Sabit reuse", FixedReuseAssignment(net, MaxColors), allServed},
-			{"Rastgele", RandomAssignment(net, MaxColors, rng), allServed},
+			{"Dağıtık (NE)", neAssign, neServed, thrNE},
+			{"Greedy", GreedyAssignment(net), allServed, nil},
+			{"DSATUR", DSATURAssignment(net), allServed, nil},
+			{"Sabit reuse", FixedReuseAssignment(net, MaxColors), allServed, nil},
+			{"Rastgele", RandomAssignment(net, MaxColors, rng), allServed, nil},
 		}
-		for s, sc := range schemes {
-			var thr []float64
-			if s == 0 {
-				thr = thrNE
-			} else {
+		for _, sc := range schemes {
+			thr := sc.thr
+			if thr == nil {
 				thr = ComputeThroughputs(net, sc.assign, sc.served, ch)
 			}
 			cmp[sc.name].cost = append(cmp[sc.name].cost, AssignmentCost(net, sc.assign))
@@ -268,28 +293,23 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 			cmp[sc.name].fair = append(cmp[sc.name].fair, JainOf(thr))
 		}
 
-		// HATA 4 DÜZELTMESİ: ortalama, hizmet veren (COMMITTED) istasyon
-		// başına hesaplanır; FAILED istasyonlar 0 Mbps'tir ve paydaya girmez.
-		committed := CommittedCount(net)
-		avgCap := meanServed(thrNE, neServed)
-		fair := JainOf(thrNE)
-		obj := CalculateGlobalObjective(net)
-		greedy := CalculateGreedyBaseline(net)
+		obj := AssignmentCost(net, neAssign)
+		greedy := cmp["Greedy"].cost[len(cmp["Greedy"].cost)-1]
 		opt := BruteForceOptimum(net, MaxColors, optBudget)
 
-		commFrac := float64(committed) / float64(len(net))
+		ms := CollectMessageStats(net)
+		msgPerBS = append(msgPerBS, float64(ms.Total)/float64(len(net)))
+		drops = append(drops, float64(ms.Dropped))
+
+		commFrac := float64(CommittedCount(net)) / float64(len(net))
 		commFracs = append(commFracs, commFrac)
 		interfs = append(interfs, obj)
-		avgCaps = append(avgCaps, avgCap)
-		fairs = append(fairs, fair)
+		avgCaps = append(avgCaps, meanServed(thrNE, neServed))
+		fairs = append(fairs, JainOf(thrNE))
 
-		ms := CollectMessageStats(net)
-		msgsPerBS = append(msgsPerBS, float64(ms.Total)/float64(len(net)))
-		conflicts = append(conflicts, float64(ms.Conflicts))
 		if converged {
 			convCount++
-			convTimes = append(convTimes, convSec)
-			convRounds = append(convRounds, convSec/ThinkPeriod.Seconds())
+			convRounds = append(convRounds, convR)
 		}
 		if obj < eps {
 			zeroInterf++
@@ -319,73 +339,34 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 			}
 		}
 
-		fmt.Printf("Run %3d | conv %5.1fs (%v) | committed %3.0f%% | msg/BS %5.1f | cnf %3d | interf %.3e | gain %.3f | PoA>= %.3f (opt exact=%v)\n",
-			r, convSec, converged, commFrac*100, float64(ms.Total)/float64(len(net)), ms.Conflicts, obj, gain, poa, opt.Exact)
+		fmt.Printf("Run %3d | conv %5.1f tur (%v) | committed %3.0f%% | interf %.3e | msg/BS %5.1f | gain %.3f | PoA>= %.3f (opt exact=%v)\n",
+			r, convR, converged, commFrac*100, obj, float64(ms.Total)/float64(len(net)), gain, poa, opt.Exact)
 	}
 
 	fmt.Printf("\n================ ÖZET (%d koşu) ================\n", runs)
 	fmt.Println("Format: ortalama ± %95 GA (1.96·σ/√n)")
-	reportStat("Yakınsama süresi (s)", convTimes)
 	reportStat("Yakınsama (protokol turu)", convRounds)
-	reportStat("Mesaj / istasyon", msgsPerBS)
-	reportStat("CONFLICT sayısı", conflicts)
 	reportStat("COMMITTED oranı", commFracs)
 	reportStat("Toplam girişim (W)", interfs)
 	reportStat("Gain over Greedy", gains)
 	reportStat("Empirik PoA alt sınırı", poas)
-	reportStat("Ort. hız / COMMITTED (Mbps)*", avgCaps)
-	reportStat("Jain fairness*", fairs)
+	reportStat("Mesaj / istasyon", msgPerBS)
+	reportStat("Düşen mesaj / koşu", drops)
+	reportStat("Ort. hız (Mbps, served)", avgCaps)
+	reportStat("Jain fairness (NE)", fairs)
 	fmt.Printf("\nYakınsayan koşu                 : %d/%d (%.0f%%)\n", convCount, runs, 100*float64(convCount)/float64(runs))
-	fmt.Printf("Girişimi ~0 olan koşu           : %d/%d (%.0f%%)  <-- \"0.0000\" iddiasının dürüst hali\n", zeroInterf, runs, 100*float64(zeroInterf)/float64(runs))
+	fmt.Printf("Girişimi ~0 olan koşu           : %d/%d (%.0f%%)\n", zeroInterf, runs, 100*float64(zeroInterf)/float64(runs))
 	fmt.Printf("Optimum kanıtlanan koşu         : %d/%d\n", optProven, runs)
 	if optZeroNE > 0 {
 		fmt.Printf("OPT=0 iken NE>0 kalan koşu      : %d (PoA bu örneklerde sonsuz)\n", optZeroNE)
 	}
-	fmt.Println("\n--- BASELINE KARŞILAŞTIRMASI (koşu başına AYNI topoloji + AYNI kanal) ---")
-	fmt.Println("Kanal donmuş olduğundan sütunlar arası fark tahsis yönteminden kaynaklanır.")
-	fmt.Printf("%-14s | %-22s | %-18s | %s\n", "Şema", "Maliyet (ort ± GA)", "Mbps/served", "Jain")
-	for _, nm := range schemeNames {
-		a := cmp[nm]
-		fmt.Printf("%-14s | %10.3e ± %.2e | %7.1f ± %5.1f | %.3f ± %.3f\n",
-			nm, mean(a.cost), ci95Half(a.cost), mean(a.thr), ci95Half(a.thr), mean(a.fair), ci95Half(a.fair))
-	}
 
-	fmt.Println("\n* Jain indeksi buradaki hız dağılımını BETİMLER; algoritma fairness'i")
-	fmt.Println("  doğrudan optimize etmez ve değer kullanıcı yerleşiminin")
-	fmt.Println("  stokastikliğini de içerir (bkz. Hata 6).")
-}
-
-// meanServed: yalnızca hizmetteki istasyonlar üzerinden ortalama hız
-// (Hata 4: FAILED istasyonlar 0 Mbps'tir ve paydaya girmez).
-func meanServed(thr []float64, served []bool) float64 {
-	sum, n := 0.0, 0
-	for i, x := range thr {
-		if served[i] {
-			sum += x
-			n++
-		}
+	// HATA 6: donmuş kanal üzerinde şema karşılaştırma tablosu.
+	fmt.Println("\n--- ŞEMA KARŞILAŞTIRMASI (aynı topoloji + aynı donmuş kanal) ---")
+	fmt.Printf("%-14s | %-22s | %-18s | %s\n", "Şema", "Çakışma maliyeti", "Mbps / served", "Jain")
+	for _, name := range schemeNames {
+		a := cmp[name]
+		fmt.Printf("%-14s | %10.3e ± %8.2e | %7.1f ± %6.1f | %.3f ± %.3f\n",
+			name, mean(a.cost), ci95Half(a.cost), mean(a.thr), ci95Half(a.thr), mean(a.fair), ci95Half(a.fair))
 	}
-	if n == 0 {
-		return 0
-	}
-	return sum / float64(n)
-}
-
-// MessageStats: koşu sonunda (goroutine'ler durduktan sonra) toplanan
-// mesaj sayaçları. Mesaj karmaşıklığı, dağıtık protokolün asıl maliyetidir.
-type MessageStats struct {
-	Total, Proposes, Conflicts, Dropped int64
-}
-
-func CollectMessageStats(net []*BaseStation) MessageStats {
-	var s MessageStats
-	for _, bs := range net {
-		for t := 0; t < 4; t++ {
-			s.Total += bs.MsgSent[t]
-		}
-		s.Proposes += bs.MsgSent[MSG_PROPOSE]
-		s.Conflicts += bs.MsgSent[MSG_CONFLICT]
-		s.Dropped += bs.MsgDropped
-	}
-	return s
 }

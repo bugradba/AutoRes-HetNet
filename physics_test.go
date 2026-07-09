@@ -5,14 +5,13 @@ import (
 	"testing"
 )
 
-// Tavan kapasitesi: B · SE_max = 20e6 · 8 / 1e6 = 160 Mbps
-const maxCapMbps = BandwidthHz * MaxSpectralEff / 1e6
+const maxCapMbps = BandwidthHz * MaxSpectralEff / 1e6 // 160 Mbps
 
-// makePair: (0,0) ve (x2,0) konumlarında komşu iki istasyon.
+// makePair: a=(0,0), b=(x2,0), birbirinin komşusu iki istasyon.
 func makePair(x2 float64) []*BaseStation {
 	a := NewBaseStation(0, 0, 0)
 	b := NewBaseStation(1, x2, 0)
-	w := 1e-9
+	w := pathGain(math.Max(x2, 1))
 	a.NeighborWeights[b.ID] = w
 	b.NeighborWeights[a.ID] = w
 	a.Neighbros = []Agent_ID{b.ID}
@@ -20,8 +19,8 @@ func makePair(x2 float64) []*BaseStation {
 	return []*BaseStation{a, b}
 }
 
-// makeChannel: gölgeleme = 1, UE'ler kendi BS'lerinden +x yönünde dServ uzakta.
-// Deterministik kanal => formül analitik değerlerle doğrulanabilir.
+// makeChannel: deterministik kanal — her UE, kendi BS'inin +x yönünde
+// dServ metre uzağında; tüm gölgelemeler 1.0.
 func makeChannel(net []*BaseStation, dServ float64) *Channel {
 	n := len(net)
 	ch := &Channel{
@@ -84,7 +83,7 @@ func TestInterferenceDecaysWithInterfererDistance(t *testing.T) {
 	// kesin artan yapar: dJU = 10, 100, 200, 400 m.
 	for _, x2 := range []float64{60, 150, 250, 450} {
 		net := makePair(x2)
-		ch := makeChannel(net, 50) // UE, a'nın +x yönünde 50 m: x2 büyüdükçe interferer uzaklaşır
+		ch := makeChannel(net, 50)
 		thr := ComputeThroughputs(net, []PRB{2, 2}, []bool{true, true}, ch)
 		if thr[0] <= prev {
 			t.Fatalf("girişimci uzaklaştıkça kapasite artmadı: x2=%.0f -> %.4f (önceki %.4f)", x2, thr[0], prev)

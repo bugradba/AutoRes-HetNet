@@ -32,8 +32,7 @@ func TestBaselinesConsistency(t *testing.T) {
 		t.Errorf("greedy wrapper tutarsız: %.6e != %.6e", got, want)
 	}
 
-	// Sıralama beklentisi (aynı graf): akıllı sezgiseller <= gerçek optimum x makul çarpan;
-	// en azından DSATUR ve Greedy, rastgele tahsisten kötü olmamalı (bu grafta).
+	// Akıllı sezgiseller (bu grafta) rastgeleden kötü olmamalı.
 	cd, cg, cr := AssignmentCost(net, dsatur), AssignmentCost(net, greedy), AssignmentCost(net, random)
 	if cd > cr || cg > cr {
 		t.Errorf("sezgiseller rastgeleden kötü: dsatur=%.3e greedy=%.3e random=%.3e", cd, cg, cr)

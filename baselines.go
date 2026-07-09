@@ -6,68 +6,63 @@ import (
 )
 
 // ============================================================
-// BASELINE TAHSİS YÖNTEMLERİ (yol haritası madde 5)
+// MERKEZİ REFERANS ŞEMALARI (BASELINES)
 //
-// "Greedy tek başına yeterli referans değil." Dağıtık çözümün
-// konumlandırılması için dört merkezi referans:
-//   - GreedyAssignment    : zorluk-sıralı açgözlü (eski baseline)
-//   - DSATURAssignment    : klasik DSATUR'un ağırlıklı-K uyarlaması
-//   - FixedReuseAssignment: planlamasız sabit frekans yeniden kullanımı
-//   - RandomAssignment    : alt sınır referansı (rastgele tahsis)
+// Dağıtık NE'nin "iyi" olup olmadığı ancak referanslarla anlaşılır:
+//   - Greedy      : zorluk-sıralı merkezi sezgisel (akıllı üst çıta)
+//   - DSATUR      : klasik doygunluk-dereceli renklendirmenin
+//                   ağırlıklı-K uyarlaması (ikinci akıllı çıta)
+//   - Sabit reuse : coğrafyayı bilmeyen statik plan, i mod K (naif çıta)
+//   - Rastgele    : alt sınır referansı
 //
-// Hepsi atamayı []PRB (ağ dizisi sırasıyla) döndürür; maliyet tek bir
-// ortak fonksiyonla (AssignmentCost) hesaplanır ki şemalar arasında
-// tanım farkı oluşmasın.
+// KRİTİK TASARIM KURALI: Bütün şemalar maliyeti TEK ortak fonksiyonla
+// (AssignmentCost) hesaplar. Şemalar arasında maliyet tanımı farkı
+// olması bu yapıda imkânsızdır.
 // ============================================================
 
-// indexOf: Agent_ID -> ağ dizisindeki konum.
-func indexOf(network []*BaseStation) map[Agent_ID]int {
-	idx := make(map[Agent_ID]int, len(network))
-	for i, bs := range network {
-		idx[bs.ID] = i
-	}
-	return idx
-}
-
-// AssignmentCost: verilen renk atamasının toplam çakışma maliyeti
-// (aynı renkli komşu çiftlerinin kenar ağırlıkları; her kenar BİR kez).
-// CalculateGlobalObjective ve BruteForceOptimum ile aynı tanımdır.
+// AssignmentCost: verilen atamada aynı-renk komşu çiftlerinin kenar
+// ağırlıkları toplamı (her kenar bir kez). Renksiz (-1) düğüm çakışma
+// üretmez. Tanım, CalculateGlobalObjective ve BruteForceOptimum ile aynıdır.
 func AssignmentCost(network []*BaseStation, assign []PRB) float64 {
 	idx := indexOf(network)
-	total := 0.0
+	cost := 0.0
 	for i, bs := range network {
+		if assign[i] == -1 {
+			continue
+		}
 		for nid, w := range bs.NeighborWeights {
 			j := idx[nid]
-			if j > i && assign[i] == assign[j] { // her kenar bir kez
-				total += w
+			if j > i && assign[j] == assign[i] { // her kenar bir kez
+				cost += w
 			}
 		}
 	}
-	return total
+	return cost
 }
 
-// totalNeighborWeight: "zorluk derecesi" — toplam komşu ağırlığı.
 func totalNeighborWeight(bs *BaseStation) float64 {
-	s := 0.0
-	for _, w := range bs.NeighborWeights {
-		s += w
+	w := 0.0
+	for _, x := range bs.NeighborWeights {
+		w += x
 	}
-	return s
+	return w
 }
 
-// GreedyAssignment: eski CalculateGreedyBaseline'ın atama DÖNDÜREN hali.
-// İstasyonlar zorluk derecesine göre (büyükten küçüğe) sıralanır; sırayla,
-// o an en az ağırlıklı ceza getiren renk atanır. Optimum garantisi YOKTUR.
+// GreedyAssignment: istasyonları "zorluk"a göre (toplam komşu ağırlığı,
+// büyükten küçüğe) sıralar; her birine, o ana dek renklenmiş komşularına
+// göre en az ağırlıklı cezayı getiren rengi verir.
 func GreedyAssignment(network []*BaseStation) []PRB {
 	idx := indexOf(network)
 	n := len(network)
 
-	order := make([]*BaseStation, n)
-	copy(order, network)
-	// Basit bubble sort (n küçük; eski davranışla birebir aynı sıralama)
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	// zorluk = toplam komşu ağırlığı; büyükten küçüğe
 	for i := 0; i < n; i++ {
 		for j := 0; j < n-i-1; j++ {
-			if totalNeighborWeight(order[j]) < totalNeighborWeight(order[j+1]) {
+			if totalNeighborWeight(network[order[j]]) < totalNeighborWeight(network[order[j+1]]) {
 				order[j], order[j+1] = order[j+1], order[j]
 			}
 		}
@@ -77,7 +72,8 @@ func GreedyAssignment(network []*BaseStation) []PRB {
 	for i := range assign {
 		assign[i] = -1
 	}
-	for _, bs := range order {
+	for _, i := range order {
+		bs := network[i]
 		bestColor := PRB(0)
 		minImpact := math.MaxFloat64
 		for c := PRB(0); c < PRB(MaxColors); c++ {
@@ -92,12 +88,12 @@ func GreedyAssignment(network []*BaseStation) []PRB {
 				bestColor = c
 			}
 		}
-		assign[idx[bs.ID]] = bestColor
+		assign[i] = bestColor
 	}
 	return assign
 }
 
-// DSATURAssignment: DSATUR'un (Brélaz 1979) K-renkli, ağırlıklı uyarlaması.
+// DSATURAssignment: klasik DSATUR'un ağırlıklı-K uyarlaması.
 // Her adımda doygunluğu (renklenmiş komşulardaki FARKLI renk sayısı) en
 // yüksek düğüm seçilir (eşitlikte toplam komşu ağırlığı büyük olan);
 // düğüme, renklenmiş komşularına göre en az ağırlıklı ceza getiren renk verilir.
