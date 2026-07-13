@@ -20,27 +20,41 @@ The cell-as-player, color-as-frequency idea is well established in the potential
 
 ## Key empirical findings
 
-All numbers below come from seeded Monte Carlo experiments with 95% confidence intervals (mean ± 1.96·σ/√n), not single runs.
+All numbers below come from seeded Monte Carlo experiments with 95% confidence intervals (mean ± 1.96·σ/√n): the main table from 200 runs (`-runs 200 -optbudget 30s`, seed 42, N=40, K=5), the sweep from 30 runs per grid cell (`-sweep -runs 30 -timescale 0.1`).
 
-> **Note:** the conflict-handling semantics were corrected after these numbers were produced (an earlier bug silently dropped objections between two simultaneously-proposing stations). Qualitative findings (constant-round convergence, linear message complexity, the zero-interference/chromatic-number boundary, near-centralized quality) reproduce under the fixed protocol; regenerate the exact tables with the commands below before quoting them.
+**1. Convergence takes ~8–9 protocol rounds, nearly independent of density.** Across the K ∈ {3,4,5,6} × N ∈ {20,40,60,80} sweep, mean convergence time stayed within 8.1–9.0 think-periods while N quadrupled and the number of `CONFLICT` messages grew ~35× (2.6 → 89.8 at K=3). Mechanism: a contention loser backs off and re-proposes *within* the winners' commit-timeout window, so contention is absorbed by the pipeline instead of extending it. Two honest boundary signals: (a) rounds drift slightly upward with N (8.1 at N=20 → ~8.8–9.0 at N=80), and (b) at N=80 one run in thirty (3 of 480 total) failed to fully converge within the 40-round safety cap, stalling at 95–97.5% committed.
 
-**1. Convergence takes ~8 protocol rounds, essentially independent of density.** Across a K ∈ {3,4,5,6} × N ∈ {20,40,60,80} sweep (30 runs per cell, fixed 400×400 m area), convergence rate was 100% and convergence time stayed at 8.0–8.1 think-periods — even as the number of `CONFLICT` messages grew ~35× (2 → 71 at K=3). Mechanism: losers of a color contention back off and re-propose *within* the winners' commit-timeout window, so contention is absorbed by the pipeline instead of extending it. **Caveat:** this constancy is tied to the timeout structure and has so far been verified up to N=80; stress regimes (K=2, N up to 200) are the next experiment (`-sweepK "2,3" -sweepN "80,120,160,200"`).
+![Convergence-round CDFs across the K × N grid](docs/figures/sweep_cdf.png)
+*Convergence-round CDFs (30 runs/cell): every curve rises steeply at 8–10 rounds regardless of N.*
 
-**2. Message complexity is linear in density.** Messages per station grow ~9 → ~38 as N goes 20 → 80 (average degree grows linearly at fixed area). No queue drops were observed at any tested density.
+**1b. Stress test: the constant is the *median*, and the failure mode is graceful.** Pushing into color-starved regimes (K ∈ {2,3}, N up to 200, 30 runs per cell: `-sweepK "2,3" -sweepN "80,120,160,200"`) quantifies the limit. *Median* convergence stays at ~9–10 rounds even at K=2, N=200 — where CONFLICT messages reach ~900 per run (~350× the sparse regime) — but a heavy straggler tail emerges: the 90th percentile stretches to 15–31 rounds, and 3–20% of runs per cell fail to fully converge within the 40-round cap. Crucially, every "failed" run stalls at **95–100% committed** — one or two stations cycling in contention — never a collapse; message cost stays exactly linear (~N/2 per station) and no queue ever overflowed. So the precise claim is: *bulk convergence is density-invariant up to at least N=200 and K=2; beyond N≈120 in color-starved regimes, tail latency degrades and full convergence within 40 rounds drops to 80–97%, with residual non-convergence confined to isolated stragglers.*
 
-**3. Zero interference is a property of the graph, not of the algorithm.** Interference reaches exactly zero only when K ≥ the interference graph's chromatic number — in practice ~57–83% of sparse runs (N=20, K≥4) and ~0% of dense runs (N≥40 for K≤5). In dense regimes the algorithm *minimizes* interference; it cannot eliminate it. (An earlier version of this repository claimed unconditional zero interference from a single lucky run; that claim was wrong and is retracted.)
+![Stress-regime CDFs, K ∈ {2,3}, N up to 200](docs/figures/stress_cdf.png)
+*Stress regime: the bulk still converges in ~9–10 rounds even at K=2, N=200; what degrades is the tail.*
 
-**4. Near-centralized quality without a controller.** On identical frozen channel realizations (same user positions, same shadowing draws — so differences are attributable to the allocation alone), the distributed equilibrium is statistically close to centralized heuristics and far above naive schemes. Illustrative 6-run result (seed 42, capacity capped at 160 Mbps by the 8 bps/Hz spectral-efficiency ceiling):
+**2. Message complexity is linear in density.** Messages per station grow ~9 → ~38 as N goes 20 → 80 (average degree grows linearly at fixed area). No queue drops were observed in any of the 480 sweep runs or the 200 main runs.
+
+![Message and conflict scaling with N](docs/figures/sweep_scaling.png)
+*Messages per station grow linearly with N; conflicts grow much faster yet do not extend median convergence.*
+
+**3. Zero interference is a property of the graph, not of the algorithm.** Interference reaches exactly zero only when K ≥ the interference graph's chromatic number — in practice 57–93% of sparse runs (N=20, K ∈ {4,5,6}), 3% at K=3 even when sparse, and ~0% of dense runs (N≥40, except 13% at K=6). In dense regimes the algorithm *minimizes* interference; it cannot eliminate it. (An earlier version of this repository claimed unconditional zero interference from a single lucky run; that claim was wrong and is retracted.)
+
+![Zero-interference fraction over the K × N grid](docs/figures/sweep_heatmap.png)
+*Zero interference tracks the chromatic-number boundary of the interference graph, not the algorithm.*
+
+**4. Near-centralized quality without a controller.** On identical frozen channel realizations (same user positions, same shadowing draws — so differences are attributable to the allocation alone), the distributed equilibrium is statistically indistinguishable from centralized greedy in throughput and fairness, and far above naive schemes. 200-run result (seed 42, capacity capped at 160 Mbps by the 8 bps/Hz spectral-efficiency ceiling):
 
 | Scheme | Conflict cost | Mbps / served user | Jain |
 |---|---|---|---|
-| Distributed (NE) | 3.1e-09 | 120.0 ± 8.9 | 0.81 |
-| Centralized greedy | 1.4e-09 | 123.5 ± 5.5 | 0.84 |
-| DSATUR | 1.6e-09 | 127.0 ± 5.4 | 0.86 |
-| Fixed reuse (i mod K) | 5.2e-08 | 80.0 ± 9.1 | 0.61 |
-| Random | 5.7e-07 | 73.9 ± 9.9 | 0.58 |
+| Distributed (NE) | 1.76e-09 ± 0.19e-09 | 131.0 ± 1.7 | 0.866 ± 0.009 |
+| Centralized greedy | 1.35e-09 ± 0.15e-09 | 131.9 ± 1.7 | 0.871 ± 0.008 |
+| DSATUR | 1.07e-09 ± 0.15e-09 | 137.1 ± 1.9 | 0.896 ± 0.009 |
+| Fixed reuse (i mod K) | 6.34e-07 ± 4.5e-07 | 80.2 ± 1.4 | 0.616 ± 0.008 |
+| Random | 1.36e-06 ± 1.7e-06 | 77.3 ± 1.5 | 0.599 ± 0.009 |
 
-Regenerate paper-grade numbers with `go run . -runs 200` (topologies and channels are seed-reproducible; asynchronous message races are inherently not, which is part of what is being measured).
+Reading: the distributed NE pays ~1.3–1.6× the conflict cost of the centralized heuristics (Gain over Greedy 1.52 ± 0.13) but converts that into essentially equal user throughput and fairness — with no controller, using only local messaging. Where the exact optimum was proven within budget (75/200 runs), the empirical PoA lower bound averaged 3.27 ± 0.61 (and in 6 runs OPT = 0 while the NE retained conflicts, i.e. PoA = ∞ on those instances — evidence that worst-case PoA of this game is unbounded even though *average* welfare loss is modest).
+
+All runs converged (200/200) in 8.04 ± 0.03 rounds at the main configuration. Regenerate with `go run . -runs 200 -optbudget 30s` (topologies and channels are seed-reproducible; asynchronous message races are inherently not, which is part of what is being measured).
 
 ## Metrics: what they mean (and what they don't)
 
@@ -98,7 +112,7 @@ python plot_sweep.py sweep_results.csv sweep
 
 ## Limitations and future work
 
-No theoretical convergence guarantee is claimed for the asynchronous setting (interference games are not always exact potential games); convergence is demonstrated empirically. The topology is static (no mobility, no arrivals/departures). The constant-round finding must be stress-tested beyond N=80 before it can be stated as a scaling law. Fairness is not an optimization target; adding a fairness term to the utility is future work, as is comparing against learning-based (e.g., MARL) allocators.
+No theoretical convergence guarantee is claimed for the asynchronous setting (interference games are not always exact potential games); convergence is demonstrated empirically. The topology is static (no mobility, no arrivals/departures). The constant-round finding was stress-tested to N=200 / K=2 (finding 1b): the median is density-invariant but the tail is not, so any scaling-law statement must be phrased in terms of median/bulk convergence. Straggler resolution (e.g. a priority-aging rule for stations that lose repeatedly) is an open protocol improvement. Fairness is not an optimization target; adding a fairness term to the utility is future work, as is comparing against learning-based (e.g., MARL) allocators.
 
 ## Selected references
 

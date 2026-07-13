@@ -10,3 +10,6 @@ sweep_results.csv
 # Derleme
 *.exe
 /sim
+
+# Nihai sonuç figürleri/verileri sürümlenir (anlık çıktılar değil)
+!docs/**
