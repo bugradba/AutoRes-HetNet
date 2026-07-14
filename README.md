@@ -56,6 +56,16 @@ Reading: the distributed NE pays ~1.3–1.6× the conflict cost of the centraliz
 
 All runs converged (200/200) in 8.04 ± 0.03 rounds at the main configuration. Regenerate with `go run . -runs 200 -optbudget 30s` (topologies and channels are seed-reproducible; asynchronous message races are inherently not, which is part of what is being measured).
 
+**5. Against a published distributed baseline (CFL), messaging buys robustness to color scarcity.** As a sixth scheme the repository implements Communication-Free Learning (Leith & Clifford 2006; convergence for graph coloring proven by Duffy, O'Connell & Sapozhnikov 2008): fully distributed, *zero messages*, learning only from a binary per-round conflict signal. Because CFL runs synchronously and uses no timers, its results are seed-exact and machine-independent. The comparison splits cleanly into two regimes:
+
+| Regime | Ours (async, weighted, messaging) | CFL (sync, unweighted, silent) |
+|---|---|---|
+| Sparse, colors ample (N=20, K=6) | 100% conv., ~8.3 rounds | 100% conv., ~10.0 rounds |
+| Sparse, colors tight (N=20, K=4) | 100% conv., ~8.2 rounds | 53% conv., ~56 rounds |
+| Dense (N=40, K=4–6) | 100% conv., ~8.4–8.9 rounds | **0% conv.** (500-round cap) |
+
+(30 runs/cell, seed 42.) The mechanism is structural, not a tuning artifact: CFL's stopping condition *is* a proper coloring, so when the interference graph's chromatic number exceeds K — the typical dense-HetNet case — CFL cannot terminate and wanders indefinitely; its last-iterate assignment then costs ~10³× more than the NE (1.7e-06 vs 1.7e-09 at the main configuration, where CFL converged in 2/60 runs). The weighted game, by contrast, has a well-defined answer (minimum-cost coloring) even when a conflict-free one does not exist. Where proper colorings are plentiful, CFL is honestly competitive — at similar round counts and with zero message overhead. That trade-off is the fairest one-line summary of what explicit messaging buys.
+
 ## Metrics: what they mean (and what they don't)
 
 - **Gain over Greedy** — the ratio of the distributed solution's conflict cost to a centralized greedy heuristic's. This is **not** the Price of Anarchy: the denominator is a heuristic, not the optimum. An earlier version of this code mislabeled it as PoA; it has been renamed.
@@ -71,6 +81,7 @@ All runs converged (200/200) in 8.04 ± 0.03 rounds at the main configuration. R
 | `physics.go` | Frozen-channel downlink SINR / capped Shannon capacity model |
 | `metrics.go` | Jain index, global objective, greedy baseline wrapper |
 | `baselines.go` | Greedy, DSATUR, fixed-reuse and random allocators (shared cost definition) |
+| `cfl.go` | Published distributed baseline: Communication-Free Learning (Leith & Clifford) |
 | `optimum.go` | Exact social optimum via branch-and-bound |
 | `experiment.go` | Reproducible topology builder, logical-convergence runner, Monte Carlo core |
 | `sweep.go` | K × N convergence sweep with CSV export |
@@ -116,4 +127,4 @@ No theoretical convergence guarantee is claimed for the asynchronous setting (in
 
 ## Selected references
 
-R. W. Rosenthal, *A class of games possessing pure-strategy Nash equilibria*, Int. J. Game Theory, 1973 · D. Monderer, L. S. Shapley, *Potential games*, GEB, 1996 · P. N. Panagopoulou, P. G. Spirakis, *A game theoretic approach for efficient graph coloring*, ISAAC 2008 · K. Cohen, A. Leshem, E. Zehavi, *Convergence of approximate best-response dynamics in interference games*.
+R. W. Rosenthal, *A class of games possessing pure-strategy Nash equilibria*, Int. J. Game Theory, 1973 · D. Monderer, L. S. Shapley, *Potential games*, GEB, 1996 · P. N. Panagopoulou, P. G. Spirakis, *A game theoretic approach for efficient graph coloring*, ISAAC 2008 · K. Cohen, A. Leshem, E. Zehavi, *Convergence of approximate best-response dynamics in interference games* · D. J. Leith, P. Clifford, *A self-managed distributed channel selection algorithm for WLAN*, RAWNET/WiOpt, 2006 · K. R. Duffy, N. O'Connell, A. Sapozhnikov, *Complexity analysis of a decentralised graph colouring algorithm*, Inf. Process. Lett., 2008.

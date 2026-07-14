@@ -229,7 +229,7 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	fmt.Printf("--- MONTE CARLO: %d koşu (baseSeed=%d, N=%d, Alan=%.0fm, Eşik=%.0fm, K=%d) ---\n\n",
 		runs, baseSeed, SimN, SimAreaSize, SimThreshold, MaxColors)
 
-	schemeNames := []string{"Dağıtık (NE)", "Greedy", "DSATUR", "Sabit reuse", "Rastgele"}
+	schemeNames := []string{"Dağıtık (NE)", "CFL (yayın)", "Greedy", "DSATUR", "Sabit reuse", "Rastgele"}
 	cmp := map[string]*schemeAgg{}
 	for _, n := range schemeNames {
 		cmp[n] = &schemeAgg{}
@@ -247,8 +247,11 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		fairs      []float64
 		zeroInterf int
 		convCount  int
-		optProven  int
-		optZeroNE  int // OPT=0 iken NE>0 kalan koşular (PoA=+Inf örnekleri)
+
+		cflRoundsAll []float64 // yalnızca yakınsayan CFL koşuları
+		cflConvCount int
+		optProven    int
+		optZeroNE    int // OPT=0 iken NE>0 kalan koşular (PoA=+Inf örnekleri)
 	)
 	const eps = 1e-15
 
@@ -271,6 +274,17 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		for i := range allServed {
 			allServed[i] = true
 		}
+
+		// Yayımlanmış dağıtık referans: CFL (Leith & Clifford 2006;
+		// Duffy ve ark. 2008). Senkron, mesajsız; aynı topoloji ve aynı
+		// donmuş kanal üzerinde değerlendirilir. rng'den beslenir =>
+		// aynı seed'de makineden bağımsız birebir tekrarlanabilir.
+		cflAssign, cflR, cflOK := RunCFL(net, MaxColors, CFLDefaultB, CFLMaxRounds, rng)
+		if cflOK {
+			cflConvCount++
+			cflRoundsAll = append(cflRoundsAll, float64(cflR))
+		}
+
 		schemes := []struct {
 			name   string
 			assign []PRB
@@ -278,6 +292,7 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 			thr    []float64
 		}{
 			{"Dağıtık (NE)", neAssign, neServed, thrNE},
+			{"CFL (yayın)", cflAssign, allServed, nil},
 			{"Greedy", GreedyAssignment(net), allServed, nil},
 			{"DSATUR", DSATURAssignment(net), allServed, nil},
 			{"Sabit reuse", FixedReuseAssignment(net, MaxColors), allServed, nil},
@@ -354,7 +369,9 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	reportStat("Düşen mesaj / koşu", drops)
 	reportStat("Ort. hız (Mbps, served)", avgCaps)
 	reportStat("Jain fairness (NE)", fairs)
+	reportStat("CFL turu (yakınsayan)", cflRoundsAll)
 	fmt.Printf("\nYakınsayan koşu                 : %d/%d (%.0f%%)\n", convCount, runs, 100*float64(convCount)/float64(runs))
+	fmt.Printf("CFL yakınsayan koşu             : %d/%d (%.0f%%) [tavan %d tur]\n", cflConvCount, runs, 100*float64(cflConvCount)/float64(runs), CFLMaxRounds)
 	fmt.Printf("Girişimi ~0 olan koşu           : %d/%d (%.0f%%)\n", zeroInterf, runs, 100*float64(zeroInterf)/float64(runs))
 	fmt.Printf("Optimum kanıtlanan koşu         : %d/%d\n", optProven, runs)
 	if optZeroNE > 0 {

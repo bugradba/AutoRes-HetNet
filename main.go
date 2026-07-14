@@ -134,6 +134,9 @@ func main() {
 	for i := range allServed {
 		allServed[i] = true
 	}
+	cflAssign, cflR, cflOK := RunCFL(Network, MaxColors, CFLDefaultB, CFLMaxRounds, rng)
+	fmt.Printf("\nCFL (Leith & Clifford): yakınsadı=%v, %d turda (mesajsız, senkron)\n", cflOK, cflR)
+
 	fmt.Println("\n--- ŞEMA KARŞILAŞTIRMASI (aynı topoloji + aynı donmuş kanal) ---")
 	fmt.Printf("%-14s | %-14s | %-12s | %s\n", "Şema", "Maliyet", "Mbps/served", "Jain")
 	for _, sc := range []struct {
@@ -142,6 +145,7 @@ func main() {
 		served []bool
 	}{
 		{"Dağıtık (NE)", neAssign, neServed},
+		{"CFL (yayın)", cflAssign, allServed},
 		{"Greedy", GreedyAssignment(Network), allServed},
 		{"DSATUR", DSATURAssignment(Network), allServed},
 		{"Sabit reuse", FixedReuseAssignment(Network, MaxColors), allServed},
