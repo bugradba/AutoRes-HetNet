@@ -2,43 +2,116 @@ package main
 
 import "math"
 
-// ------------- Yardımcı metrik fonksiyonları -------------
+// ------------- Yardımcı olacak fonksiyonlarr -------------
 
-func Distance(a, b *BaseStation) float64 {
-	return math.Hypot(a.X-b.X, a.Y-b.Y)
+func Distance(a, b *BaseStation) float64 { //MESAFE HESABI
+	return math.Sqrt(math.Pow(a.X-b.X, 2) + math.Pow(a.Y-b.Y, 2))
 }
 
-// JainOf: Jain's Fairness Index — (Σx)² / (n·Σx²).
-// Baseline karşılaştırmasında şemaların hız vektörleri doğrudan buna verilir.
-func JainOf(xs []float64) float64 {
-	var sum, sumSq float64
-	for _, x := range xs {
-		sum += x
-		sumSq += x * x
-	}
-	if sumSq == 0 {
-		return 0
-	}
-	return (sum * sum) / (float64(len(xs)) * sumSq)
-}
+//  Jain's Fairness Index Fonksiyonu
+// Formül: (Toplam x)^2 / (n * Toplam x^2)
 
 func CalculateJainsFairness(network []*BaseStation) float64 {
-	xs := make([]float64, len(network))
-	for i, bs := range network {
-		xs[i] = bs.Throughput
+	var sumThroughput float64
+	var sumSquareThroughput float64
+	n := float64(len(network))
+
+	for _, bs := range network {
+		xi := bs.Throughput
+		sumThroughput += xi
+		sumSquareThroughput += (xi * xi)
 	}
-	return JainOf(xs)
+
+	if sumSquareThroughput == 0 {
+		return 0
+	}
+
+	jainsIndex := (sumThroughput * sumThroughput) / (n * sumSquareThroughput)
+	return jainsIndex
 }
 
-// GLOBAL AMAÇ FONKSİYONU (toplam ağ çakışma maliyeti).
-// Artık ortak AssignmentCost tanımının ince bir sarmalayıcısıdır:
-// dağıtık NE ile bütün baseline'lar AYNI maliyet tanımını paylaşır.
+// GLOBAL AMAÇ FONKSİYONU (Total Network Interference)
+// Tüm ağdaki toplam çatışma maliyetini hesaplar.
+// Hedef: Bu değerin simülasyon sonunda azalmış olmasıdır.
+
 func CalculateGlobalObjective(network []*BaseStation) float64 {
-	assign := make([]PRB, len(network))
-	for i, bs := range network {
-		assign[i] = bs.CurrentPRB
+	totalCost := 0.0
+
+	for _, bs := range network {
+		if bs.CurrentPRB == -1 {
+			continue
+		}
+
+		for neighborID, weight := range bs.NeighborWeights {
+			var neighborColor PRB = -1
+			for _, node := range network {
+				if node.ID == neighborID {
+					neighborColor = node.CurrentPRB
+					break
+				}
+			}
+
+			if neighborColor != -1 && bs.CurrentPRB == neighborColor {
+				totalCost += weight
+			}
+		}
 	}
-	return AssignmentCost(network, assign)
+
+	return totalCost / 2.0
+}
+
+// ============================================================
+// H-2 DENETİMİ: NASH DENGESİ DOĞRULAMASI
+//
+// Simülasyon bittikten SONRA, her istasyonun GERÇEK nihai komşu
+// renklerine göre (ajanın kendi NeighborMap'i değil, ağın yer
+// gerçeği) en-iyi-yanıtını yeniden hesaplar. Mevcut renginden
+// kesin olarak daha düşük maliyetli bir renge geçmek isteyen
+// istasyon sayısını döndürür.
+//
+// Tanım gereği bu sayı 0 değilse nihai tahsis Nash dengesi
+// DEĞİLDİR; "NASH EQUILIBRIUM REACHED" iddiası ancak bu denetim
+// 0 ihlal verdiğinde yapılabilir.
+// ============================================================
+
+// interferenceOfColor: bs 'c' rengini seçseydi, verilen gerçek renk
+// haritasına göre katlanacağı toplam girişim ağırlığı.
+func interferenceOfColor(bs *BaseStation, c PRB, trueColors map[Agent_ID]PRB) float64 {
+	total := 0.0
+	for neighborID, weight := range bs.NeighborWeights {
+		if nc, ok := trueColors[neighborID]; ok && nc != -1 && nc == c {
+			total += weight
+		}
+	}
+	return total
+}
+
+// VerifyNashEquilibrium: tek taraflı sapma isteği olan istasyonların
+// sayısını döndürür (uncommitted istasyonlar ayrı sayılır).
+func VerifyNashEquilibrium(network []*BaseStation) (violations, uncommitted int) {
+	trueColors := make(map[Agent_ID]PRB, len(network))
+	for _, bs := range network {
+		trueColors[bs.ID] = bs.CurrentPRB
+	}
+
+	for _, bs := range network {
+		if bs.CurrentPRB == -1 {
+			uncommitted++
+			continue
+		}
+		currentCost := interferenceOfColor(bs, bs.CurrentPRB, trueColors)
+		for c := PRB(0); c < MaxColors; c++ {
+			if c == bs.CurrentPRB {
+				continue
+			}
+			// Kesin iyileşme var mı? (küçük görece pay: float gürültüsüne karşı)
+			if interferenceOfColor(bs, c, trueColors) < currentCost*(1-1e-9) {
+				violations++
+				break
+			}
+		}
+	}
+	return violations, uncommitted
 }
 
 // MERKEZİ GREEDY REFERANS (BASELINE) HESAPLAYICISI
@@ -48,9 +121,75 @@ func CalculateGlobalObjective(network []*BaseStation) float64 {
 // "Price of Anarchy" DEĞİLDİR; doğru adı "Gain over Greedy"dir.
 // Gerçek optimum için optimum.go içindeki BruteForceOptimum'a bakınız.
 //
-// Uygulama, baselines.go'daki ortak altyapıyı kullanır: atama
-// GreedyAssignment ile üretilir, maliyet tüm şemalarla AYNI tanımı
-// kullanan AssignmentCost ile hesaplanır (tanım farkı riski yok).
+// Yöntem: İstasyonları "Zorluk Derecesine" göre sırala (toplam komşu ağırlığı),
+// en zor istasyondan başlayarak o an en az ceza getiren rengi ata.
+// (Basit bir Bubble Sort yapıyoruz, node sayısı az olduğu için yeterli)
+
 func CalculateGreedyBaseline(network []*BaseStation) float64 {
-	return AssignmentCost(network, GreedyAssignment(network))
+	// Mevcut simülasyonu bozmamak için geçici bir renk haritası oluşturuyoruz
+	tempColors := make(map[Agent_ID]PRB)
+	for _, bs := range network {
+		tempColors[bs.ID] = -1 // Önce herkes renksiz
+	}
+
+	sortedNodes := make([]*BaseStation, len(network))
+	copy(sortedNodes, network)
+
+	for i := 0; i < len(sortedNodes); i++ {
+		for j := 0; j < len(sortedNodes)-i-1; j++ {
+			// Komşu sayısı * Ağırlık toplamı mantığıyla "zorluk" ölçelim
+			weightI := 0.0
+			for _, w := range sortedNodes[j].NeighborWeights {
+				weightI += w
+			}
+
+			weightJ := 0.0
+			for _, w := range sortedNodes[j+1].NeighborWeights {
+				weightJ += w
+			}
+
+			if weightI < weightJ { // Büyükten küçüğe sırala
+				sortedNodes[j], sortedNodes[j+1] = sortedNodes[j+1], sortedNodes[j]
+			}
+		}
+	}
+
+	// Merkezi Zeka ile Renk Dağıt (Greedy Optimization)
+
+	for _, bs := range sortedNodes {
+		bestColor := PRB(0)
+		minGlobalImpact := math.MaxFloat64
+
+		for c := PRB(0); c < MaxColors; c++ {
+			currentImpact := 0.0
+
+			for neighborID, weight := range bs.NeighborWeights {
+				if assignedColor, exists := tempColors[neighborID]; exists && assignedColor != -1 {
+					if assignedColor == c {
+						currentImpact += weight
+					}
+				}
+			}
+
+			if currentImpact < minGlobalImpact {
+				minGlobalImpact = currentImpact
+				bestColor = c
+			}
+		}
+		tempColors[bs.ID] = bestColor
+	}
+
+	// Bu greedy dağıtımın toplam maliyetini hesapla (optimum olduğu garanti DEĞİL)
+	totalCentralizedCost := 0.0
+	for _, bs := range network {
+		myColor := tempColors[bs.ID]
+		for neighborID, weight := range bs.NeighborWeights {
+			neighborColor := tempColors[neighborID]
+			if myColor == neighborColor {
+				totalCentralizedCost += weight
+			}
+		}
+	}
+
+	return totalCentralizedCost / 2.0
 }
