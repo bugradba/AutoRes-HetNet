@@ -15,11 +15,43 @@ func main() {
 	// Tek bir stokastik koşu temsil edici olmadığı için sayılar
 	// yalnızca çok-koşulu ortalama ± güven aralığı olarak savunulabilir.
 
-	runs := flag.Int("runs", 100, "Monte Carlo koşu sayısı (1 = eski tarz ayrıntılı tek koşu)")
+	runs := flag.Int("runs", 100, "Monte Carlo koşu sayısı (1 = eski tarz ayrıntılı tek koşu); sweep modunda hücre başına koşu")
 	seed := flag.Int64("seed", 42, "temel tohum; koşu r'nin tohumu = seed + r (tekrarlanabilirlik)")
 	verbose := flag.Bool("v", false, "ajan mesajlarını yazdır (yalnızca -runs 1 için önerilir)")
 	optBudget := flag.Duration("optbudget", 3*time.Second, "koşu başına B&B optimum zaman bütçesi")
+
+	// Y-1: README'nin belgeleyip kodda bulunmayan bayraklar
+	sweep := flag.Bool("sweep", false, "K x N yakınsama taramasını çalıştır")
+	sweepK := flag.String("sweepK", "3,4,5,6", "tarama K değerleri (virgülle ayrık)")
+	sweepN := flag.String("sweepN", "20,40,60,80", "tarama N değerleri (virgülle ayrık)")
+	timescale := flag.Float64("timescale", 1.0, "tüm protokol zamanlayıcılarını ölçekler (0.1 = 10x hızlı; oranlar korunur)")
+	csvPath := flag.String("csv", "sweep_results.csv", "sweep ham veri çıktısı (koşu başına satır)")
 	flag.Parse()
+
+	if *timescale <= 0 {
+		fmt.Println("HATA: -timescale pozitif olmalı")
+		os.Exit(1)
+	}
+	SetTimescale(*timescale)
+
+	if *sweep {
+		Verbose = false
+		Ks, err := ParseIntList(*sweepK)
+		if err != nil {
+			fmt.Println("HATA: -sweepK:", err)
+			os.Exit(1)
+		}
+		Ns, err := ParseIntList(*sweepN)
+		if err != nil {
+			fmt.Println("HATA: -sweepN:", err)
+			os.Exit(1)
+		}
+		if err := RunSweep(Ks, Ns, *runs, *seed, *csvPath); err != nil {
+			fmt.Println("HATA: sweep:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *runs > 1 {
 		Verbose = false // yüzlerce koşuda ajan logları hem okunmaz hem yavaşlatır
@@ -39,11 +71,14 @@ func main() {
 
 	// ESKİ: time.Sleep(15 * time.Second) — duvar saati, yakınsama koşulu değil.
 	// YENİ: mantıksal yakınsama (tüm istasyonlar COMMITTED) + güvenlik üst sınırı.
-	convSec, converged := RunSimulation(Network, 20*time.Second)
+	convSec, converged := RunSimulation(Network, MaxWait)
 
 	fmt.Println("\n--- Simulation completed ---")
-	fmt.Printf("Yakınsama: %v | Süre: %.2f s | COMMITTED: %d/%d\n",
-		converged, convSec, CommittedCount(Network), numDevice)
+	fmt.Printf("Yakınsama: %v | Süre: %.2f s (%.1f protokol turu) | COMMITTED: %d/%d\n",
+		converged, convSec, convSec/ThinkPeriod.Seconds(), CommittedCount(Network), numDevice)
+	mst := CollectMessageStats(Network)
+	fmt.Printf("Mesajlar: %d gönderildi (%.1f/istasyon) | %d düştü | %d CONFLICT\n",
+		mst.Sent, float64(mst.Sent)/float64(numDevice), mst.Dropped, mst.Conflicts)
 
 	// H-2 denetimi: nihai tahsis GERÇEKTEN Nash dengesi mi?
 	// (Her istasyonun gerçek nihai komşu renklerine göre en-iyi-yanıtı
@@ -123,7 +158,7 @@ func main() {
 	// için buradaki oran PoA'nın kendisi değil, bir ALT SINIRIDIR.
 	fmt.Println("\n--- TRUE OPTIMUM (Branch-and-Bound) ---")
 	optStart := time.Now()
-	opt := BruteForceOptimum(Network, MaxColors, 10*time.Second)
+	opt := BruteForceOptimum(Network, int(MaxColors), 10*time.Second)
 	fmt.Printf("B&B süresi: %.2fs | Kanıtlanmış optimum: %v\n", time.Since(optStart).Seconds(), opt.Exact)
 
 	if !opt.Exact {

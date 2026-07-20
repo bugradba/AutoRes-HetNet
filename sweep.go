@@ -1,124 +1,140 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // ============================================================
-// YAKINSAMA TARAMASI (K × N ızgarası) — projenin asıl katkısının
-// (asenkron protokolün yakınsama davranışı) sistematik ölçümü.
+// Y-1 DÜZELTMESİ: K x N YAKINSAMA TARAMASI
 //
-// Her (K, N) hücresi için 'runsPer' bağımsız koşu yapılır ve şunlar
-// ölçülür: yakınsama oranı ve süresi (PROTOKOL TURU cinsinden — sabit
-// zamanlayıcıların duvar saatini domine etmesi sorununu aşar), mesaj
-// karmaşıklığı (istasyon başına), CONFLICT ve düşen mesaj sayıları,
-// sıfır-girişim oranı (K'nin kromatik sayıya yetip yetmediğinin izi).
+// README'nin belgeleyip depoda bulunmayan ikinci dosya. Renk sayısı
+// (K) ve istasyon sayısı (N) ızgarası üzerinde, hücre başına 'runs'
+// bağımsız koşu yapar; ham veriyi koşu-satırı olarak CSV'ye yazar
+// (CDF'ler ve ölçekleme grafikleri plot_sweep.py ile bu dosyadan
+// üretilir) ve hücre özetlerini ekrana basar.
 //
-// Ham koşu verileri CSV'ye yazılır; makaledeki yakınsama-süresi
-// CDF'leri doğrudan bu dosyadan çizilir (plot_sweep.py).
-//
-// NOT: Tarama, -timescale ile küçültülmüş zamanlayıcılarla çalıştırılmak
-// üzere tasarlandı (örn. 0.1). Zamanlayıcı ORANLARI korunduğundan
-// protokol dinamiği niteliksel olarak aynı kalır; protokol-turu ve mesaj
-// metrikleri zaten ölçekten bağımsızdır.
+// Yakınsama süresi PROTOKOL TURU (think-period) cinsindendir; bu birim
+// -timescale'den bağımsızdır, dolayısıyla hızlandırılmış (ör. 0.1)
+// taramaların sonuçları tam hızla karşılaştırılabilir.
 // ============================================================
 
-func RunSweep(runsPer int, baseSeed int64, csvPath string, Ks, Ns []int) {
+// ParseIntList: "3,4,5,6" -> [3 4 5 6]. Sweep bayrakları için.
+func ParseIntList(s string) ([]int, error) {
+	parts := strings.Split(s, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		v, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return nil, fmt.Errorf("geçersiz liste öğesi %q: %w", p, err)
+		}
+		if v <= 0 {
+			return nil, fmt.Errorf("liste öğeleri pozitif olmalı: %d", v)
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// RunSweep: her (K, N) hücresi için 'runsPerCell' koşu yapar.
+// Koşu r'nin tohumu = baseSeed + r: aynı N için topoloji K'den
+// bağımsızdır, yani K etkisi kanal/yerleşim şansından izole edilir.
+func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) error {
 	f, err := os.Create(csvPath)
 	if err != nil {
-		fmt.Printf("CSV açılamadı (%v); yalnızca özet basılacak.\n", err)
-		f = nil
-	} else {
-		defer f.Close()
-		fmt.Fprintln(f, "K,N,run,seed,converged,conv_sec,conv_rounds,committed_frac,avg_degree,msgs_per_bs,proposes,conflicts,dropped,interference,zero_interf,avg_mbps_served,jain,cfl_converged,cfl_rounds,cfl_cost")
+		return fmt.Errorf("CSV açılamadı: %w", err)
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	header := []string{
+		"k", "n", "run", "seed", "converged", "conv_rounds", "conv_seconds",
+		"committed_frac", "interference_w", "ne_violations",
+		"msgs_per_station", "drops_total", "conflicts_total", "zero_interference",
+	}
+	if err := w.Write(header); err != nil {
+		return err
 	}
 
+	const eps = 1e-15
 	origK := MaxColors
 	defer func() { MaxColors = origK }()
 
-	fmt.Printf("--- YAKINSAMA TARAMASI: K=%v x N=%v, hücre başına %d koşu ---\n", Ks, Ns, runsPer)
-	fmt.Printf("(ThinkPeriod=%v, CommitTimeout=%v; 1 protokol turu = 1 ThinkPeriod)\n\n", ThinkPeriod, CommitTimeout)
-	fmt.Printf("%-4s %-4s | %-8s | %-16s | %-12s | %-10s | %-8s | %s\n",
-		"K", "N", "conv%", "tur (ort±GA)", "msg/BS", "CONFLICT", "drop", "sıfır%")
+	fmt.Printf("--- SWEEP: K=%v x N=%v, hücre başına %d koşu (baseSeed=%d, timescale ThinkPeriod=%v) ---\n\n",
+		Ks, Ns, runsPerCell, baseSeed, ThinkPeriod)
 
-	cfg := 0
-	for _, K := range Ks {
-		for _, N := range Ns {
-			MaxColors = K
+	for _, k := range Ks {
+		for _, n := range Ns {
+			MaxColors = PRB(k)
 
-			var rounds, msgs, cnfs, drops, cflRounds []float64
-			convCount, zeroCount := 0, 0
+			var (
+				rounds    []float64
+				convCount int
+				zeroCount int
+				neOK      int
+				msgAvg    []float64
+				dropSum   int64
+				confSum   int64
+			)
 
-			for r := 0; r < runsPer; r++ {
-				seed := baseSeed + int64(cfg)*100000 + int64(r)
+			for r := 0; r < runsPerCell; r++ {
+				seed := baseSeed + int64(r)
 				rng := rand.New(rand.NewSource(seed))
-				net := BuildNetwork(rng, N, SimAreaSize, SimThreshold, false)
+				net := BuildNetwork(rng, n, SimAreaSize, SimThreshold, false)
 
-				degSum := 0
-				for _, bs := range net {
-					degSum += len(bs.Neighbros)
-				}
-				avgDeg := float64(degSum) / float64(N)
-
-				maxWait := 40 * ThinkPeriod // ölçekle uyumlu üst sınır (~20 s @ ölçek 1)
-				convSec, converged := RunSimulation(net, maxWait)
-				convR := convSec / ThinkPeriod.Seconds()
-
-				ms := CollectMessageStats(net)
-				perBS := float64(ms.Total) / float64(N)
-
+				convSec, converged := RunSimulation(net, MaxWait)
 				obj := CalculateGlobalObjective(net)
-				zero := obj < 1e-15
-				commFrac := float64(CommittedCount(net)) / float64(N)
-
-				ch := DrawChannel(net, rng)
-				assign, served := NEAssignment(net)
-				thr := ComputeThroughputs(net, assign, served, ch)
-				avgMbps := meanServed(thr, served)
-				jain := JainOf(thr)
-
-				// CFL karşılaştırması: aynı topolojide, ayrık rng ile
-				// (protokolün rng tüketimini etkilemesin diye türetilmiş tohum).
-				cflRng := rand.New(rand.NewSource(seed*31 + 7))
-				cflAssign, cflR, cflOK := RunCFL(net, K, CFLDefaultB, CFLMaxRounds, cflRng)
-				cflCost := AssignmentCost(net, cflAssign)
-				if cflOK {
-					cflRounds = append(cflRounds, float64(cflR))
-				}
+				viol, uncomm := VerifyNashEquilibrium(net)
+				mst := CollectMessageStats(net)
+				commFrac := float64(CommittedCount(net)) / float64(n)
+				convRound := convSec / ThinkPeriod.Seconds()
 
 				if converged {
 					convCount++
-					rounds = append(rounds, convR)
+					rounds = append(rounds, convRound)
 				}
-				if zero {
+				if obj < eps {
 					zeroCount++
 				}
-				msgs = append(msgs, perBS)
-				cnfs = append(cnfs, float64(ms.Conflicts))
-				drops = append(drops, float64(ms.Dropped))
+				if viol == 0 && uncomm == 0 {
+					neOK++
+				}
+				msgAvg = append(msgAvg, float64(mst.Sent)/float64(n))
+				dropSum += mst.Dropped
+				confSum += mst.Conflicts
 
-				if f != nil {
-					fmt.Fprintf(f, "%d,%d,%d,%d,%t,%.4f,%.3f,%.4f,%.3f,%.3f,%d,%d,%d,%.6e,%t,%.3f,%.4f,%t,%d,%.6e\n",
-						K, N, r, seed, converged, convSec, convR, commFrac, avgDeg,
-						perBS, ms.Proposes, ms.Conflicts, ms.Dropped, obj, zero, avgMbps, jain,
-						cflOK, cflR, cflCost)
+				row := []string{
+					strconv.Itoa(k), strconv.Itoa(n), strconv.Itoa(r),
+					strconv.FormatInt(seed, 10),
+					strconv.FormatBool(converged),
+					fmt.Sprintf("%.3f", convRound),
+					fmt.Sprintf("%.3f", convSec),
+					fmt.Sprintf("%.4f", commFrac),
+					fmt.Sprintf("%.6e", obj),
+					strconv.Itoa(viol + uncomm),
+					fmt.Sprintf("%.2f", float64(mst.Sent)/float64(n)),
+					strconv.FormatInt(mst.Dropped, 10),
+					strconv.FormatInt(mst.Conflicts, 10),
+					strconv.FormatBool(obj < eps),
+				}
+				if err := w.Write(row); err != nil {
+					return err
 				}
 			}
+			w.Flush()
 
-			fmt.Printf("%-4d %-4d | %6.0f%%  | %6.2f ± %-6.2f | %5.1f ± %-4.1f | %8.1f | %6.1f | %5.0f%% | CFL: %5.1f tur (%.0f%%)\n",
-				K, N, 100*float64(convCount)/float64(runsPer),
-				mean(rounds), ci95Half(rounds),
-				mean(msgs), ci95Half(msgs),
-				mean(cnfs), mean(drops),
-				100*float64(zeroCount)/float64(runsPer),
-				mean(cflRounds), 100*float64(len(cflRounds))/float64(runsPer))
-			cfg++
+			fmt.Printf("K=%d N=%3d | conv %3d/%d | tur %6.1f ± %4.1f | NE %3d/%d | sıfır-girişim %3.0f%% | msg/bs %5.1f | drop %d | conflict %d\n",
+				k, n, convCount, runsPerCell, mean(rounds), ci95Half(rounds),
+				neOK, runsPerCell, 100*float64(zeroCount)/float64(runsPerCell),
+				mean(msgAvg), dropSum, confSum)
 		}
 	}
 
-	if f != nil {
-		fmt.Printf("\nHam koşu verileri yazıldı: %s (CDF'ler için: python plot_sweep.py %s sweep)\n", csvPath, csvPath)
-	}
+	fmt.Printf("\nHam veri yazıldı: %s (grafikler: python plot_sweep.py %s <prefix>)\n", csvPath, csvPath)
+	return nil
 }

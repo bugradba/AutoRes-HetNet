@@ -1,165 +1,115 @@
 package main
 
-import (
-	"math"
-	"math/rand"
-)
+import "math"
 
-// SINR ve SHANNON KAPASİTE HESABI (Hata 4, 5 ve 6 düzeltilmiş model)
+// ============================================================
+// Y-2 DÜZELTMESİ: FİZİK KATMANI YENİDEN YAZIMI
 //
-// İndirme yönü (downlink) SINR'ı KULLANICI (UE) KONUMUNDA hesaplanır:
+// Eski modelin sorunları ve burada nasıl giderildikleri:
 //
-//	SINR_i = S_i / ( Σ_j I_j + N0·B )
+//  1. TOHUM İHLALİ: Eski kod her çağrıda time.Now().UnixNano() ile
+//     kendi RNG'sini kuruyordu; aynı seed iki farklı throughput
+//     üretiyordu. YENİ: tüm rastgelelik (kullanıcı konumu + tüm
+//     gölgeleme çekilişleri) koşu başında deney RNG'sinden BİR KEZ
+//     çizilip BaseStation üzerinde dondurulur (FreezeChannel).
+//     Bu dosyada hiç RNG yoktur; fonksiyonlar tamamen deterministiktir.
 //
-//	S_i : servis BS'ten UE'ye gelen güç              = Ptx · G0 · d_iU^-α · χ_i
-//	I_j : aynı PRB'yi kullanan, HİZMETTEKİ komşu j'den
-//	      UE'ye gelen güç                            = Ptx · G0 · d_jU^-α · χ_ij
+//  2. "CELL SHRINKAGE": Kullanıcı mesafesi istasyonun girişim
+//     durumuna göre seçiliyordu (girişim varsa yakın, yoksa uzak) —
+//     karşılaştırılan şemalar arasında sistematik yanlılık. YENİ:
+//     kullanıcı konumu tahsisten BAĞIMSIZ, koşu başında sabittir;
+//     tüm şemalar aynı kullanıcıyı servis eder.
 //
-// HATA 4 DÜZELTMELERİ:
-//  (1) COMMITTED olamayan (FAILED) istasyon yayında değildir: kullanıcısı
-//      0 Mbps alır ve ortalamayı ŞİŞİRMEZ (eskiden girişimsiz sayılıp
-//      en yüksek hızı alıyordu).
-//  (2) FAILED komşu yayın yapamayacağı için girişim de ÜRETEMEZ.
+//  3. YANLIŞ GİRİŞİM GEOMETRİSİ: Girişim, girişimci-BS -> kullanıcı
+//     kazancı yerine BS -> BS kenar ağırlığıyla hesaplanıyordu.
+//     YENİ: girişim, girişimci istasyonun KONUMUNDAN kullanıcının
+//     KONUMUNA gerçek mesafe üzerinden (path loss + donmuş
+//     gölgeleme) hesaplanır.
 //
-// HATA 5 DÜZELTMELERİ:
-//  (1) Girişim, komşu BS'ten KULLANICIYA olan gerçek geometrik mesafeden
-//      hesaplanır (eskiden BS-BS link ağırlığı kullanılıyordu).
-//  (2) Servis linkinde de log-normal gölgeleme vardır (simetri).
-//  (3) SINR ≤ ~30 dB ve SE ≤ 8 bps/Hz tavanları (fiziksel gerçekçilik;
-//      eski model 500 Mbps'e varan tavansız hızlar üretebiliyordu).
-//  (4) RNG artık PARAMETRE: time.Now() tohumu kaldırıldı, -seed verildiğinde
-//      throughput/fairness de tekrarlanabilir.
-//  (5) Eski "cell shrinkage" (girişim arttıkça kullanıcıyı BS'e yaklaştırma)
-//      kaldırıldı: kötü tahsisin cezasını modelden silen ters nedensellikti.
+//  4. TAVAN YOK: SINR ve spektral verimlilik sınırsızdı (~12.4 bps/Hz
+//     gözlenmişti; 256-QAM pratiği ~7.4). YENİ: SINR <= 30 dB ve
+//     spektral verimlilik <= 8 bps/Hz (20 MHz'te 160 Mbps) tavanları.
 //
-// HATA 6 DÜZELTMESİ — DONMUŞ KANAL GERÇEKLEMESİ:
-// Kanalın TÜM stokastik bileşenleri (UE konumları, servis gölgelemesi,
-// her komşu link için girişim gölgelemesi) koşu başına BİR KEZ çekilir
-// (DrawChannel) ve bütün tahsis şemaları (dağıtık NE, greedy, DSATUR,
-// sabit reuse, rastgele) AYNI gerçekleme üzerinde değerlendirilir
-// (ComputeThroughputs). Böylece şemalar arasındaki fairness/hız FARKI
-// yalnızca tahsis kararından kaynaklanır; kullanıcı yerleşiminin şansı
-// ortak paydada sadeleşir.
+//  5. FAILED İSTASYON ŞİŞİRMESİ (eski 'Hata 4'): COMMIT edemeyen
+//     istasyon girişimsiz sayılıp şişkin throughput ile ortalamaya
+//     giriyordu. YENİ: renk atanmamış (PRB=-1) istasyon iletim
+//     yapamaz; throughput = 0.
+//
+//  6. Girişim ajanın kendi (eksik olabilen) NeighborMap'inden değil,
+//     ağın YER GERÇEĞİ renklerinden hesaplanır: bu bir ölçüm
+//     (measurement) fonksiyonudur, ajan kararı değil.
+// ============================================================
 
-// Channel: bir koşunun donmuş kanal gerçeklemesi (ağ dizisi sırasıyla indeksli).
-type Channel struct {
-	UEX, UEY     []float64              // her istasyonun kullanıcısının konumu
-	DServ        []float64              // UE'nin servis BS'ine uzaklığı
-	ServShadow   []float64              // servis linki gölgelemesi χ_i
-	InterfShadow []map[Agent_ID]float64 // [i][j]: komşu j -> i'nin UE'si linki gölgelemesi χ_ij
-}
-
-// lognormalShadow: log-normal gölgeleme çarpanı χ = exp(σ·X), X ~ N(0,1).
-// Topoloji kurulumu (BuildNetwork) ve fiziksel katman AYNI modeli kullanır.
-func lognormalShadow(rng *rand.Rand) float64 {
-	return math.Exp(rng.NormFloat64() * ShadowSigma)
-}
-
-// pathGain: log-uzaklık yol kaybı kazancı, G0 · d^-α (d0 = 1 m referans).
-func pathGain(d float64) float64 {
-	if d < 1.0 {
-		d = 1.0 // referans mesafenin altına inme
+// interferencePowerAt: verilen renk haritasına göre, bs'nin
+// kullanıcısının konumunda gördüğü toplam girişim gücü (Watt).
+// Yalnızca gerçekten iletim yapan (renk atanmış) eş-kanal komşular
+// sayılır; geometri girişimci-BS -> kullanıcı mesafesidir.
+func interferencePowerAt(bs *BaseStation, myColor PRB, network []*BaseStation, colorOf map[Agent_ID]PRB) float64 {
+	byID := make(map[Agent_ID]*BaseStation, len(network))
+	for _, node := range network {
+		byID[node.ID] = node
 	}
-	return ReferenceLoss * math.Pow(d, -PathLossExponent)
+
+	interference := 0.0
+	for _, neighborID := range bs.Neighbros {
+		nc, ok := colorOf[neighborID]
+		if !ok || nc == -1 || nc != myColor {
+			continue // iletmeyen ya da farklı kanaldaki komşu girişim yapmaz
+		}
+		interferer := byID[neighborID]
+
+		// GERÇEK girişimci -> kullanıcı geometrisi:
+		dx := interferer.X - bs.UserX
+		dy := interferer.Y - bs.UserY
+		dist := math.Max(1.0, math.Sqrt(dx*dx+dy*dy)) // referans mesafesi altına inme
+
+		gain := ReferenceLoss * math.Pow(dist, -PathLossExponent) * bs.InterfShadow[neighborID]
+		interference += TxPowerWatts * gain
+	}
+	return interference
 }
 
-// indexOf: Agent_ID -> ağ dizisi indeksi.
-func indexOf(network []*BaseStation) map[Agent_ID]int {
-	idx := make(map[Agent_ID]int, len(network))
+// CapacityForColor: bs 'color' rengiyle iletim yapsaydı, donmuş kanal
+// gerçekleşmesi altında kullanıcısının göreceği kapasite (Mbps).
+// color == -1 (iletim yok) için 0 döner.
+func CapacityForColor(bs *BaseStation, color PRB, network []*BaseStation, colorOf map[Agent_ID]PRB) float64 {
+	if color == -1 {
+		return 0.0 // Hata 4 düzeltmesi: iletmeyen istasyonun hızı yoktur
+	}
+
+	// Serving link: BS -> kendi kullanıcısı (donmuş konum + gölgeleme)
+	dx := bs.X - bs.UserX
+	dy := bs.Y - bs.UserY
+	servingDist := math.Max(1.0, math.Sqrt(dx*dx+dy*dy))
+	signalGain := ReferenceLoss * math.Pow(servingDist, -PathLossExponent) * bs.ServingShadow
+	signalPower := TxPowerWatts * signalGain
+
+	interferencePower := interferencePowerAt(bs, color, network, colorOf)
+
+	// SINR + tavanlar
+	sinr := signalPower / (interferencePower + NoiseWatts)
+	sinr = math.Min(sinr, SINRCapLinear) // <= 30 dB
+
+	spectralEff := math.Min(math.Log2(1+sinr), SpectralEffCapBpsHz) // <= 8 bps/Hz
+	return BandwidthHz * spectralEff / 1e6                          // Mbps (20 MHz'te <= 160)
+}
+
+// CalculateShannonCapacity: istasyonun MEVCUT (dağıtık protokolün
+// ürettiği) rengine göre throughput'unu hesaplayıp Struct'a yazar.
+// Girişim, ağın yer gerçeği renklerinden okunur.
+func (bs *BaseStation) CalculateShannonCapacity(network []*BaseStation) {
+	colorOf := ColorsOfNetwork(network)
+	bs.Throughput = CapacityForColor(bs, bs.CurrentPRB, network, colorOf)
+}
+
+// ThroughputsForAssignment: verilen tahsis (renk haritası) için tüm
+// istasyonların kapasitelerini döndürür — AYNI donmuş kanal üzerinde.
+// Baseline şemalarının (greedy/DSATUR/fixed/random) dağıtık çözümle
+// adil karşılaştırılmasını sağlar: fark yalnızca tahsise atfedilebilir.
+func ThroughputsForAssignment(network []*BaseStation, colorOf map[Agent_ID]PRB) []float64 {
+	caps := make([]float64, len(network))
 	for i, bs := range network {
-		idx[bs.ID] = i
+		caps[i] = CapacityForColor(bs, colorOf[bs.ID], network, colorOf)
 	}
-	return idx
-}
-
-// DrawChannel: koşunun tüm kanal rastgeleliğini BİR KEZ çeker.
-func DrawChannel(network []*BaseStation, rng *rand.Rand) *Channel {
-	n := len(network)
-	ch := &Channel{
-		UEX: make([]float64, n), UEY: make([]float64, n),
-		DServ:        make([]float64, n),
-		ServShadow:   make([]float64, n),
-		InterfShadow: make([]map[Agent_ID]float64, n),
-	}
-	for i, bs := range network {
-		d := UEMinDist + rng.Float64()*(UEMaxDist-UEMinDist)
-		theta := rng.Float64() * 2 * math.Pi
-		ch.DServ[i] = d
-		ch.UEX[i] = bs.X + d*math.Cos(theta)
-		ch.UEY[i] = bs.Y + d*math.Sin(theta)
-		ch.ServShadow[i] = lognormalShadow(rng)
-		ch.InterfShadow[i] = make(map[Agent_ID]float64, len(bs.NeighborWeights))
-		for nid := range bs.NeighborWeights {
-			ch.InterfShadow[i][nid] = lognormalShadow(rng)
-		}
-	}
-	return ch
-}
-
-// ComputeThroughputs: verilen renk ataması (assign) ve hizmet vektörü
-// (served; false => istasyon yayında değil, Hata 4) için, donmuş kanal
-// üzerinde her istasyonun kullanıcı hızını (Mbps) döndürür.
-func ComputeThroughputs(network []*BaseStation, assign []PRB, served []bool, ch *Channel) []float64 {
-	idx := indexOf(network)
-	out := make([]float64, len(network))
-
-	for i := range network {
-		// HATA 4 (1/2): hizmette olmayan istasyonun kullanıcısı 0 Mbps.
-		if !served[i] {
-			out[i] = 0
-			continue
-		}
-
-		signalPower := TxPowerWatts * pathGain(ch.DServ[i]) * ch.ServShadow[i]
-
-		// HATA 4 (2/2) + HATA 5 (1): girişim yalnızca fiilen yayında olan
-		// (served) aynı-renk komşulardan, interferer -> UE mesafesi üzerinden.
-		interferencePower := 0.0
-		for nid, shadow := range ch.InterfShadow[i] {
-			j := idx[nid]
-			if !served[j] || assign[j] != assign[i] {
-				continue
-			}
-			nb := network[j]
-			dJU := math.Hypot(nb.X-ch.UEX[i], nb.Y-ch.UEY[i])
-			interferencePower += TxPowerWatts * pathGain(dJU) * shadow
-		}
-
-		// HATA 5 (3): SINR ve spektral verim tavanları.
-		sinr := signalPower / (interferencePower + NoiseWatts)
-		if sinr > MaxSINR {
-			sinr = MaxSINR
-		}
-		se := math.Log2(1 + sinr)
-		if se > MaxSpectralEff {
-			se = MaxSpectralEff
-		}
-		out[i] = BandwidthHz * se / 1e6 // Mbps
-	}
-	return out
-}
-
-// NEAssignment: dağıtık koşunun ürettiği sonucu (renk + hizmet durumu)
-// atama vektörlerine çevirir. COMMITTED olamayan istasyon hizmet dışıdır.
-func NEAssignment(network []*BaseStation) (assign []PRB, served []bool) {
-	assign = make([]PRB, len(network))
-	served = make([]bool, len(network))
-	for i, bs := range network {
-		assign[i] = bs.CurrentPRB
-		served[i] = bs.State == STATE_COMMITTED
-	}
-	return assign, served
-}
-
-// EvaluateNetworkThroughput: tek koşu / görselleştirme uyumluluğu —
-// kanal çeker, NE'yi değerlendirir, sonuçları bs.Throughput'a yazar
-// ve kanalı döndürür (baseline kıyasları aynı kanalı kullanabilsin diye).
-func EvaluateNetworkThroughput(network []*BaseStation, rng *rand.Rand) *Channel {
-	ch := DrawChannel(network, rng)
-	assign, served := NEAssignment(network)
-	thr := ComputeThroughputs(network, assign, served, ch)
-	for i, bs := range network {
-		bs.Throughput = thr[i]
-	}
-	return ch
+	return caps
 }

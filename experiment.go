@@ -62,6 +62,27 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 			}
 		}
 	}
+	// ============================================================
+	// Y-2: DONMUŞ KANAL GERÇEKLEŞMESİ (frozen channel realization)
+	// Kullanıcı konumları ve TÜM PHY gölgeleme çekilişleri koşu
+	// başında, deney rng'sinden BİR KEZ çizilir:
+	//   - Aynı seed => aynı kanal => aynı throughput (tekrarlanabilir).
+	//   - Kullanıcı konumu tahsisten bağımsızdır (cell shrinkage yok).
+	//   - Tüm tahsis şemaları aynı gerçekleşme üzerinde karşılaştırılır.
+	// Determinizm için Neighbros DİLİMİ üzerinde yinelenir (harita
+	// yineleme sırası rastgele olurdu).
+	// ============================================================
+	for i := 0; i < n; i++ {
+		bs := net[i]
+		angle := rng.Float64() * 2 * math.Pi
+		userDist := UserMinDist + rng.Float64()*(UserMaxDist-UserMinDist)
+		bs.UserX = bs.X + userDist*math.Cos(angle)
+		bs.UserY = bs.Y + userDist*math.Sin(angle)
+		bs.ServingShadow = math.Exp(rng.NormFloat64() * ShadowSigmaLn)
+		for _, neighborID := range bs.Neighbros {
+			bs.InterfShadow[neighborID] = math.Exp(rng.NormFloat64() * ShadowSigmaLn)
+		}
+	}
 	return net
 }
 
@@ -142,11 +163,10 @@ func allCommittedSnap(snap []stationSnapshot) bool {
 // raporlanır; bekleme penceresi süreye dahil edilmez.
 // maxWait: livelock/kilitlenme ihtimaline karşı güvenlik üst sınırı.
 func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, converged bool) {
-	// Pencere, COMMITTED denetim periyodundan (500 ms tick) ve commit
-	// zaman aşımından (2 s) uzun olmalı ki "sessizlik" gerçekten
-	// "kimsenin sapma isteği kalmadı" anlamına gelsin.
-	const quietWindow = 3 * time.Second
-
+	// Pencere (types.go/QuietWindow), COMMITTED denetim periyodundan
+	// (ThinkPeriod) ve commit zaman aşımından uzun olmalı ki "sessizlik"
+	// gerçekten "kimsenin sapma isteği kalmadı" anlamına gelsin.
+	// -timescale ile diğer tüm sürelerle birlikte ölçeklenir.
 	var wg sync.WaitGroup
 	wg.Add(len(net))
 
@@ -160,13 +180,13 @@ func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, 
 	lastChange := time.Now()
 
 	for {
-		time.Sleep(50 * time.Millisecond) // yoklama aralığı
+		time.Sleep(PollInterval) // yoklama aralığı
 		cur := takeSnapshot(net)
 		if !snapshotsEqual(cur, prev) {
 			prev = cur
 			lastChange = time.Now()
 		}
-		if allCommittedSnap(cur) && time.Since(lastChange) >= quietWindow {
+		if allCommittedSnap(cur) && time.Since(lastChange) >= QuietWindow {
 			converged = true
 			break
 		}
@@ -184,9 +204,58 @@ func RunSimulation(net []*BaseStation, maxWait time.Duration) (convSec float64, 
 	// Yakınsamadan bittiyse: Think() içindeki 2 s'lik commit zamanlayıcıları
 	// hâlâ bekliyor olabilir; metrikleri yarışsız okumak için süre tanı.
 	if !converged {
-		time.Sleep(2200 * time.Millisecond)
+		time.Sleep(CommitTimeout + 200*time.Millisecond)
 	}
 	return convSec, converged
+}
+
+// ------------------- MESAJ İSTATİSTİKLERİ (Y-4) -------------------
+
+type MessageStats struct {
+	Sent      int64
+	Dropped   int64
+	Conflicts int64
+}
+
+// CollectMessageStats: koşu sonunda (Stop + wg.Wait sonrası) tüm
+// istasyonların sayaçlarını toplar.
+func CollectMessageStats(net []*BaseStation) MessageStats {
+	var st MessageStats
+	for _, bs := range net {
+		st.Sent += bs.MsgSent.Load()
+		st.Dropped += bs.MsgDropped.Load()
+		st.Conflicts += bs.ConflictsSent.Load()
+	}
+	return st
+}
+
+// meanOfServed: renk atanmış istasyonların ortalama throughput'u.
+// (FAILED istasyonların 0 Mbps'i "servis edilen kullanıcı" ortalamasını
+// sulandırmasın; kaç istasyonun servis dışı kaldığı ayrıca raporlanır.)
+func meanOfServed(caps []float64, colors map[Agent_ID]PRB, net []*BaseStation) float64 {
+	sum, n := 0.0, 0
+	for i, bs := range net {
+		if c, ok := colors[bs.ID]; ok && c != -1 {
+			sum += caps[i]
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return sum / float64(n)
+}
+
+func jainOf(caps []float64) float64 {
+	var s, ss float64
+	for _, x := range caps {
+		s += x
+		ss += x * x
+	}
+	if ss == 0 {
+		return 0
+	}
+	return s * s / (float64(len(caps)) * ss)
 }
 
 // ------------------- İSTATİSTİK YARDIMCILARI -------------------
@@ -265,10 +334,22 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		fairs      []float64
 		nashViols  []float64 // koşu başına sapmak isteyen istasyon sayısı (H-2 denetimi)
 		nashOK     int       // 0 ihlalli (gerçek Nash dengesi) koşu sayısı
-		zeroInterf int       // girişimi ~0 olan koşu sayısı ("0.0000" iddiasının dürüst hali)
-		convCount  int
-		optProven  int
-		optZeroNE  int // optimum 0 iken NE>0 kalan koşular (PoA=+Inf örnekleri)
+		convRounds []float64 // yakınsama süresi, protokol turu (think-period) cinsinden
+		msgsPerBS  []float64 // istasyon başına ortalama mesaj (Y-4)
+		dropsTotal []float64 // koşu başına düşen mesaj sayısı (Y-4)
+		conflicts  []float64 // koşu başına CONFLICT sayısı
+
+		// Baseline karşılaştırması (Y-1): tüm şemalar AYNI donmuş kanal
+		// üzerinde değerlendirilir; satırlar şema, metrikler maliyet /
+		// servis edilen kullanıcı başına Mbps / Jain.
+		schemeCosts = map[string][]float64{}
+		schemeMbps  = map[string][]float64{}
+		schemeJain  = map[string][]float64{}
+		schemeNames = []string{"Distributed (NE)", "Centralized greedy", "DSATUR", "Fixed reuse", "Random"}
+		zeroInterf  int // girişimi ~0 olan koşu sayısı ("0.0000" iddiasının dürüst hali)
+		convCount   int
+		optProven   int
+		optZeroNE   int // optimum 0 iken NE>0 kalan koşular (PoA=+Inf örnekleri)
 	)
 	const eps = 1e-15
 
@@ -276,21 +357,42 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		rng := rand.New(rand.NewSource(baseSeed + int64(r)))
 		net := BuildNetwork(rng, SimN, SimAreaSize, SimThreshold, false)
 
-		convSec, converged := RunSimulation(net, 20*time.Second)
+		convSec, converged := RunSimulation(net, MaxWait)
 
-		// Metrikler (NOT: CalculateShannonCapacity hâlâ Hata 4 & 5'i
-		// içeriyor — FAILED istasyon şişirmesi ve zayıf SINR modeli.
-		// Bu metriklerin mutlak değerleri o düzeltmelere kadar temkinli okunmalı.)
-		total := 0.0
-		for _, bs := range net {
-			bs.CalculateShannonCapacity(net)
-			total += bs.Throughput
+		// Metrikler — Y-2 sonrası: donmuş kanal, girişimci->kullanıcı
+		// geometrisi, SINR/SE tavanları; FAILED istasyon 0 Mbps sayılır.
+		distColors := ColorsOfNetwork(net)
+		distCaps := ThroughputsForAssignment(net, distColors)
+		for i, bs := range net {
+			bs.Throughput = distCaps[i]
 		}
-		avgCap := total / float64(len(net))
-		fair := CalculateJainsFairness(net)
+		avgCap := meanOfServed(distCaps, distColors, net)
+		fair := jainOf(distCaps)
 		obj := CalculateGlobalObjective(net)
 		greedy := CalculateGreedyBaseline(net)
-		opt := BruteForceOptimum(net, MaxColors, optBudget)
+
+		// Y-1: baseline şemaları — aynı topoloji + aynı donmuş kanal.
+		// Random, deney rng'sinden beslenir (seed-tekrarlanabilir).
+		assignments := map[string]map[Agent_ID]PRB{
+			"Distributed (NE)":   distColors,
+			"Centralized greedy": GreedyAssignment(net),
+			"DSATUR":             DSATURAssignment(net),
+			"Fixed reuse":        FixedReuseAssignment(net),
+			"Random":             RandomAssignment(net, rng),
+		}
+		for name, colors := range assignments {
+			caps := ThroughputsForAssignment(net, colors)
+			schemeCosts[name] = append(schemeCosts[name], AssignmentCost(net, colors))
+			schemeMbps[name] = append(schemeMbps[name], meanOfServed(caps, colors, net))
+			schemeJain[name] = append(schemeJain[name], jainOf(caps))
+		}
+
+		// Y-4: mesaj istatistikleri
+		mst := CollectMessageStats(net)
+		msgsPerBS = append(msgsPerBS, float64(mst.Sent)/float64(len(net)))
+		dropsTotal = append(dropsTotal, float64(mst.Dropped))
+		conflicts = append(conflicts, float64(mst.Conflicts))
+		opt := BruteForceOptimum(net, int(MaxColors), optBudget)
 
 		// H-2 denetimi: nihai tahsis gerçekten Nash dengesi mi?
 		viol, uncomm := VerifyNashEquilibrium(net)
@@ -308,6 +410,8 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 		if converged {
 			convCount++
 			convTimes = append(convTimes, convSec)
+			// O-3/README: zaman ölçeğinden bağımsız birim — protokol turu
+			convRounds = append(convRounds, convSec/ThinkPeriod.Seconds())
 		}
 		if obj < eps {
 			zeroInterf++
@@ -351,6 +455,20 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	reportStat("Ort. kullanıcı hızı (Mbps)*", avgCaps)
 	reportStat("Jain fairness*", fairs)
 	reportStat("Nash ihlali (istasyon/koşu)", nashViols)
+	reportStat("Yakınsama (protokol turu)", convRounds)
+	reportStat("Mesaj / istasyon", msgsPerBS)
+	reportStat("Düşen mesaj / koşu", dropsTotal)
+	reportStat("CONFLICT / koşu", conflicts)
+
+	fmt.Println("\n---- BASELINE KARŞILAŞTIRMASI (aynı donmuş kanallar) ----")
+	fmt.Printf("%-20s | %-22s | %-18s | %s\n", "Şema", "Çakışma maliyeti (W)", "Mbps / servis edilen", "Jain")
+	for _, name := range schemeNames {
+		fmt.Printf("%-20s | %10.3e ± %.2e | %8.1f ± %5.1f | %.3f ± %.3f\n",
+			name,
+			mean(schemeCosts[name]), ci95Half(schemeCosts[name]),
+			mean(schemeMbps[name]), ci95Half(schemeMbps[name]),
+			mean(schemeJain[name]), ci95Half(schemeJain[name]))
+	}
 	fmt.Printf("\nYakınsayan koşu                 : %d/%d (%.0f%%)\n", convCount, runs, 100*float64(convCount)/float64(runs))
 	fmt.Printf("Gerçek Nash dengesi olan koşu   : %d/%d (0 ihlal + 0 uncommitted)\n", nashOK, runs)
 	fmt.Printf("Girişimi ~0 olan koşu           : %d/%d (%.0f%%)  <-- \"0.0000\" iddiasının dürüst hali\n", zeroInterf, runs, 100*float64(zeroInterf)/float64(runs))
@@ -358,6 +476,6 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	if optZeroNE > 0 {
 		fmt.Printf("OPT=0 iken NE>0 kalan koşu      : %d (PoA bu örneklerde sonsuz)\n", optZeroNE)
 	}
-	fmt.Println("\n* Hata 4 & 5 (throughput bug'ı, SINR modeli) düzeltilene kadar")
-	fmt.Println("  kapasite/fairness değerleri temkinli yorumlanmalıdır.")
+	fmt.Println("\n* Kapasite/fairness: donmuş kanal, girişimci->kullanıcı geometrisi,")
+	fmt.Println("  SINR<=30dB ve <=8 bps/Hz tavanlarıyla (Y-2 düzeltmesi sonrası model).")
 }

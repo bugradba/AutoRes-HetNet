@@ -114,82 +114,13 @@ func VerifyNashEquilibrium(network []*BaseStation) (violations, uncommitted int)
 	return violations, uncommitted
 }
 
-// MERKEZİ GREEDY REFERANS (BASELINE) HESAPLAYICISI
+// MERKEZİ GREEDY REFERANS (BASELINE) SARMALAYICISI
 //
-// DİKKAT: Bu fonksiyon gerçek optimumu DEĞİL, sezgisel (heuristic) bir
-// merkezi greedy çözümü hesaplar. Bu yüzden buna oranlanan metrik
-// "Price of Anarchy" DEĞİLDİR; doğru adı "Gain over Greedy"dir.
-// Gerçek optimum için optimum.go içindeki BruteForceOptimum'a bakınız.
-//
-// Yöntem: İstasyonları "Zorluk Derecesine" göre sırala (toplam komşu ağırlığı),
-// en zor istasyondan başlayarak o an en az ceza getiren rengi ata.
-// (Basit bir Bubble Sort yapıyoruz, node sayısı az olduğu için yeterli)
-
+// DİKKAT: Bu, gerçek optimum DEĞİL, sezgisel merkezi greedy çözümüdür;
+// buna oranlanan metrik "Price of Anarchy" DEĞİL, "Gain over Greedy"dir.
+// Gerçek optimum için optimum.go / BruteForceOptimum'a bakınız.
+// Tahsis mantığı baselines.go'ya taşındı (Y-1); maliyet tanımı tüm
+// şemalarla ortaktır (AssignmentCost).
 func CalculateGreedyBaseline(network []*BaseStation) float64 {
-	// Mevcut simülasyonu bozmamak için geçici bir renk haritası oluşturuyoruz
-	tempColors := make(map[Agent_ID]PRB)
-	for _, bs := range network {
-		tempColors[bs.ID] = -1 // Önce herkes renksiz
-	}
-
-	sortedNodes := make([]*BaseStation, len(network))
-	copy(sortedNodes, network)
-
-	for i := 0; i < len(sortedNodes); i++ {
-		for j := 0; j < len(sortedNodes)-i-1; j++ {
-			// Komşu sayısı * Ağırlık toplamı mantığıyla "zorluk" ölçelim
-			weightI := 0.0
-			for _, w := range sortedNodes[j].NeighborWeights {
-				weightI += w
-			}
-
-			weightJ := 0.0
-			for _, w := range sortedNodes[j+1].NeighborWeights {
-				weightJ += w
-			}
-
-			if weightI < weightJ { // Büyükten küçüğe sırala
-				sortedNodes[j], sortedNodes[j+1] = sortedNodes[j+1], sortedNodes[j]
-			}
-		}
-	}
-
-	// Merkezi Zeka ile Renk Dağıt (Greedy Optimization)
-
-	for _, bs := range sortedNodes {
-		bestColor := PRB(0)
-		minGlobalImpact := math.MaxFloat64
-
-		for c := PRB(0); c < MaxColors; c++ {
-			currentImpact := 0.0
-
-			for neighborID, weight := range bs.NeighborWeights {
-				if assignedColor, exists := tempColors[neighborID]; exists && assignedColor != -1 {
-					if assignedColor == c {
-						currentImpact += weight
-					}
-				}
-			}
-
-			if currentImpact < minGlobalImpact {
-				minGlobalImpact = currentImpact
-				bestColor = c
-			}
-		}
-		tempColors[bs.ID] = bestColor
-	}
-
-	// Bu greedy dağıtımın toplam maliyetini hesapla (optimum olduğu garanti DEĞİL)
-	totalCentralizedCost := 0.0
-	for _, bs := range network {
-		myColor := tempColors[bs.ID]
-		for neighborID, weight := range bs.NeighborWeights {
-			neighborColor := tempColors[neighborID]
-			if myColor == neighborColor {
-				totalCentralizedCost += weight
-			}
-		}
-	}
-
-	return totalCentralizedCost / 2.0
+	return AssignmentCost(network, GreedyAssignment(network))
 }

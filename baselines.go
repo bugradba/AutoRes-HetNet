@@ -3,166 +3,164 @@ package main
 import (
 	"math"
 	"math/rand"
+	"sort"
 )
 
 // ============================================================
-// MERKEZİ REFERANS ŞEMALARI (BASELINES)
+// Y-1 DÜZELTMESİ: BASELINE TAHSİSÇİLERİ
 //
-// Dağıtık NE'nin "iyi" olup olmadığı ancak referanslarla anlaşılır:
-//   - Greedy      : zorluk-sıralı merkezi sezgisel (akıllı üst çıta)
-//   - DSATUR      : klasik doygunluk-dereceli renklendirmenin
-//                   ağırlıklı-K uyarlaması (ikinci akıllı çıta)
-//   - Sabit reuse : coğrafyayı bilmeyen statik plan, i mod K (naif çıta)
-//   - Rastgele    : alt sınır referansı
+// README'nin belgeleyip depoda bulunmayan dosya. Dağıtık çözümün
+// karşılaştırıldığı dört referans şema burada yaşar:
 //
-// KRİTİK TASARIM KURALI: Bütün şemalar maliyeti TEK ortak fonksiyonla
-// (AssignmentCost) hesaplar. Şemalar arasında maliyet tanımı farkı
-// olması bu yapıda imkânsızdır.
+//   - Greedy   : ağırlıklı zorluk sırasına göre merkezi açgözlü
+//   - DSATUR   : klasik doygunluk-derecesi sezgiseli (ağırlık duyarlı
+//                renk seçimiyle)
+//   - Fixed    : statik frekans yeniden kullanımı (renk = ID mod K)
+//   - Random   : tekdüze rastgele tahsis (alt sınır / kontrol)
+//
+// ORTAK MALİYET TANIMI: Tüm şemalar (dağıtık NE dahil) aynı maliyetle
+// ölçülür — AssignmentCost: aynı renkli komşu çiftlerinin kenar
+// ağırlıkları toplamı, her kenar bir kez. CalculateGlobalObjective
+// ve BruteForceOptimum ile birebir aynı tanımdır.
 // ============================================================
 
-// AssignmentCost: verilen atamada aynı-renk komşu çiftlerinin kenar
-// ağırlıkları toplamı (her kenar bir kez). Renksiz (-1) düğüm çakışma
-// üretmez. Tanım, CalculateGlobalObjective ve BruteForceOptimum ile aynıdır.
-func AssignmentCost(network []*BaseStation, assign []PRB) float64 {
-	idx := indexOf(network)
-	cost := 0.0
-	for i, bs := range network {
-		if assign[i] == -1 {
+// ColorsOfNetwork: ağın mevcut (dağıtık protokolün ürettiği) renk
+// haritası. FAILED istasyonlar -1 olarak kalır.
+func ColorsOfNetwork(network []*BaseStation) map[Agent_ID]PRB {
+	colors := make(map[Agent_ID]PRB, len(network))
+	for _, bs := range network {
+		colors[bs.ID] = bs.CurrentPRB
+	}
+	return colors
+}
+
+// AssignmentCost: verilen tahsisin toplam çakışma maliyeti.
+// Renk atanmamış (-1) istasyonlar iletmez, maliyete katılmaz.
+func AssignmentCost(network []*BaseStation, colors map[Agent_ID]PRB) float64 {
+	total := 0.0
+	for _, bs := range network {
+		myColor, ok := colors[bs.ID]
+		if !ok || myColor == -1 {
 			continue
 		}
-		for nid, w := range bs.NeighborWeights {
-			j := idx[nid]
-			if j > i && assign[j] == assign[i] { // her kenar bir kez
-				cost += w
+		for neighborID, weight := range bs.NeighborWeights {
+			if nc, ok := colors[neighborID]; ok && nc != -1 && nc == myColor {
+				total += weight
 			}
 		}
 	}
-	return cost
+	return total / 2.0 // her kenar iki kez sayıldı
 }
 
-func totalNeighborWeight(bs *BaseStation) float64 {
-	w := 0.0
-	for _, x := range bs.NeighborWeights {
-		w += x
-	}
-	return w
-}
-
-// GreedyAssignment: istasyonları "zorluk"a göre (toplam komşu ağırlığı,
-// büyükten küçüğe) sıralar; her birine, o ana dek renklenmiş komşularına
-// göre en az ağırlıklı cezayı getiren rengi verir.
-func GreedyAssignment(network []*BaseStation) []PRB {
-	idx := indexOf(network)
-	n := len(network)
-
-	order := make([]int, n)
-	for i := range order {
-		order[i] = i
-	}
-	// zorluk = toplam komşu ağırlığı; büyükten küçüğe
-	for i := 0; i < n; i++ {
-		for j := 0; j < n-i-1; j++ {
-			if totalNeighborWeight(network[order[j]]) < totalNeighborWeight(network[order[j+1]]) {
-				order[j], order[j+1] = order[j+1], order[j]
+// minConflictColor: verilen kısmi renklendirmede bs için ağırlıklı
+// çakışması en düşük rengi döndürür (eşitlikte en düşük indeks).
+func minConflictColor(bs *BaseStation, colors map[Agent_ID]PRB) PRB {
+	bestColor := PRB(0)
+	minImpact := math.MaxFloat64
+	for c := PRB(0); c < MaxColors; c++ {
+		impact := 0.0
+		for neighborID, weight := range bs.NeighborWeights {
+			if nc, ok := colors[neighborID]; ok && nc != -1 && nc == c {
+				impact += weight
 			}
 		}
-	}
-
-	assign := make([]PRB, n)
-	for i := range assign {
-		assign[i] = -1
-	}
-	for _, i := range order {
-		bs := network[i]
-		bestColor := PRB(0)
-		minImpact := math.MaxFloat64
-		for c := PRB(0); c < PRB(MaxColors); c++ {
-			impact := 0.0
-			for nid, w := range bs.NeighborWeights {
-				if ac := assign[idx[nid]]; ac != -1 && ac == c {
-					impact += w
-				}
-			}
-			if impact < minImpact {
-				minImpact = impact
-				bestColor = c
-			}
+		if impact < minImpact {
+			minImpact = impact
+			bestColor = c
 		}
-		assign[i] = bestColor
 	}
-	return assign
+	return bestColor
 }
 
-// DSATURAssignment: klasik DSATUR'un ağırlıklı-K uyarlaması.
-// Her adımda doygunluğu (renklenmiş komşulardaki FARKLI renk sayısı) en
-// yüksek düğüm seçilir (eşitlikte toplam komşu ağırlığı büyük olan);
-// düğüme, renklenmiş komşularına göre en az ağırlıklı ceza getiren renk verilir.
-// K >= kromatik sayı ise klasik DSATUR gibi sıfır-çakışma üretme eğilimindedir.
-func DSATURAssignment(network []*BaseStation) []PRB {
-	idx := indexOf(network)
-	n := len(network)
-	assign := make([]PRB, n)
-	for i := range assign {
-		assign[i] = -1
+// GreedyAssignment: istasyonları "zorluk derecesine" (toplam komşu
+// ağırlığı) göre büyükten küçüğe sıralar, her birine o an en az ceza
+// getiren rengi atar. (metrics.go'daki CalculateGreedyBaseline bu
+// fonksiyonun maliyet sarmalayıcısıdır.)
+func GreedyAssignment(network []*BaseStation) map[Agent_ID]PRB {
+	sorted := make([]*BaseStation, len(network))
+	copy(sorted, network)
+	weightOf := func(bs *BaseStation) float64 {
+		w := 0.0
+		for _, v := range bs.NeighborWeights {
+			w += v
+		}
+		return w
+	}
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return weightOf(sorted[i]) > weightOf(sorted[j])
+	})
+
+	colors := make(map[Agent_ID]PRB, len(network))
+	for _, bs := range network {
+		colors[bs.ID] = -1
+	}
+	for _, bs := range sorted {
+		colors[bs.ID] = minConflictColor(bs, colors)
+	}
+	return colors
+}
+
+// DSATURAssignment: klasik DSATUR — her adımda doygunluk derecesi
+// (renklenmiş komşulardaki FARKLI renk sayısı) en yüksek düğümü seç,
+// eşitliği ağırlıklı dereceyle boz; renk seçimi ağırlık duyarlıdır
+// (en az çakışma ağırlığı, eşitlikte en düşük indeks — K yetiyorsa
+// bu, klasik "en küçük uygun renk" kuralına indirger).
+func DSATURAssignment(network []*BaseStation) map[Agent_ID]PRB {
+	colors := make(map[Agent_ID]PRB, len(network))
+	for _, bs := range network {
+		colors[bs.ID] = -1
 	}
 
-	for step := 0; step < n; step++ {
-		// En yüksek doygunluklu renksiz düğümü bul
-		best, bestSat, bestW := -1, -1, -1.0
-		for i, bs := range network {
-			if assign[i] != -1 {
+	weightOf := func(bs *BaseStation) float64 {
+		w := 0.0
+		for _, v := range bs.NeighborWeights {
+			w += v
+		}
+		return w
+	}
+	saturation := func(bs *BaseStation) int {
+		seen := make(map[PRB]bool)
+		for neighborID := range bs.NeighborWeights {
+			if nc := colors[neighborID]; nc != -1 {
+				seen[nc] = true
+			}
+		}
+		return len(seen)
+	}
+
+	for assigned := 0; assigned < len(network); assigned++ {
+		var pick *BaseStation
+		bestSat, bestW := -1, -1.0
+		for _, bs := range network {
+			if colors[bs.ID] != -1 {
 				continue
 			}
-			seen := map[PRB]bool{}
-			for nid := range bs.NeighborWeights {
-				if c := assign[idx[nid]]; c != -1 {
-					seen[c] = true
-				}
-			}
-			sat := len(seen)
-			w := totalNeighborWeight(bs)
+			sat, w := saturation(bs), weightOf(bs)
 			if sat > bestSat || (sat == bestSat && w > bestW) {
-				best, bestSat, bestW = i, sat, w
+				pick, bestSat, bestW = bs, sat, w
 			}
 		}
-
-		// Ona en az cezalı rengi ver
-		bs := network[best]
-		bestColor := PRB(0)
-		minImpact := math.MaxFloat64
-		for c := PRB(0); c < PRB(MaxColors); c++ {
-			impact := 0.0
-			for nid, w := range bs.NeighborWeights {
-				if ac := assign[idx[nid]]; ac != -1 && ac == c {
-					impact += w
-				}
-			}
-			if impact < minImpact {
-				minImpact = impact
-				bestColor = c
-			}
-		}
-		assign[best] = bestColor
+		colors[pick.ID] = minConflictColor(pick, colors)
 	}
-	return assign
+	return colors
 }
 
-// FixedReuseAssignment: planlama yapmayan sabit yeniden kullanım —
-// renkler ID sırasına göre döngüsel dağıtılır (i mod K). Coğrafyayı
-// bilmeyen "statik plan" referansıdır.
-func FixedReuseAssignment(network []*BaseStation, k int) []PRB {
-	assign := make([]PRB, len(network))
-	for i := range network {
-		assign[i] = PRB(i % k)
+// FixedReuseAssignment: statik frekans planlaması — renk = ID mod K.
+// Topolojiden habersizdir; klasik hücresel yeniden kullanımın naive hali.
+func FixedReuseAssignment(network []*BaseStation) map[Agent_ID]PRB {
+	colors := make(map[Agent_ID]PRB, len(network))
+	for _, bs := range network {
+		colors[bs.ID] = PRB(int(bs.ID) % int(MaxColors))
 	}
-	return assign
+	return colors
 }
 
-// RandomAssignment: tamamen rastgele tahsis — alt sınır referansı.
-func RandomAssignment(network []*BaseStation, k int, rng *rand.Rand) []PRB {
-	assign := make([]PRB, len(network))
-	for i := range network {
-		assign[i] = PRB(rng.Intn(k))
+// RandomAssignment: tekdüze rastgele tahsis (kontrol / alt sınır).
+// Deney rng'sinden beslenir; aynı seed aynı tahsisi üretir.
+func RandomAssignment(network []*BaseStation, rng *rand.Rand) map[Agent_ID]PRB {
+	colors := make(map[Agent_ID]PRB, len(network))
+	for _, bs := range network {
+		colors[bs.ID] = PRB(rng.Intn(int(MaxColors)))
 	}
-	return assign
+	return colors
 }

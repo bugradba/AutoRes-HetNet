@@ -24,6 +24,7 @@ func NewBaseStation(id Agent_ID, x, y float64) *BaseStation {
 		ProposedPRB: -1,
 
 		NeighborWeights: make(map[Agent_ID]float64), // Haritayı başlatmak için
+		InterfShadow:    make(map[Agent_ID]float64), // Y-2: donmuş girişim gölgelemeleri
 	}
 }
 
@@ -34,14 +35,14 @@ func (bs *BaseStation) Start(wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	// Rastgele başlangıç gecikmesi (Herkes aynı anda başlamasın)
-	time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
+	time.Sleep(time.Duration(rand.Int63n(int64(StartDelayMax))))
 
 	if Verbose {
 		fmt.Printf("[BS-%d] Start (Position: %.1f, %.1f) -> Mod: Sensing\n", bs.ID, bs.X, bs.Y)
 	}
 
 	// Ticker: Her 500ms de bir "Düşün" (Think)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(ThinkPeriod)
 	defer ticker.Stop()
 
 	// Komşulara Selam Ver
@@ -94,7 +95,7 @@ func (bs *BaseStation) Think() {
 		// denge kanıtı değildir; iddia H-2 düzeltmesiyle deney katmanındaki
 		// VerifyNashEquilibrium denetimine taşındı.
 		go func(proposed PRB) {
-			time.Sleep(2 * time.Second)
+			time.Sleep(CommitTimeout)
 			bs.Mutex.Lock()
 			defer bs.Mutex.Unlock()
 			// Eğer hala aynı teklifteysek ve girişim (Conflict) mesajı gelmediyse kazanmışızdır
@@ -272,7 +273,7 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 			// atmak. Think() SENSING dalı BackoffUntil'e saygı gösterir.
 			bs.State = STATE_SENSING
 			bs.ProposedPRB = -1
-			bs.BackoffUntil = time.Now().Add(time.Duration(rand.Intn(500)) * time.Millisecond)
+			bs.BackoffUntil = time.Now().Add(time.Duration(rand.Int63n(int64(BackoffMax))))
 		}
 
 	}
@@ -286,10 +287,18 @@ func (bs *BaseStation) Broadcast(msgType MessageType, payload string, val PRB) {
 
 func (bs *BaseStation) Send(targetID Agent_ID, msgType MessageType, payload string, val PRB) {
 	if ch, ok := bs.Outbox[targetID]; ok {
-		// Non-blocking send: Kanal doluysa bekleme yapma, simülasyonu tıkama
+		// Non-blocking send: Kanal doluysa bekleme yapma, simülasyonu tıkama.
+		// Y-4 DÜZELTMESİ: düşen mesajlar artık SESSİZCE kaybolmuyor —
+		// sayaçlarla ölçülüyor. Düşen bir CONFLICT/SUCCESS yanlış commit'e
+		// yol açabilir; sıklığı ölçülemeyen olay analiz edilemez.
 		select {
 		case ch <- Message{Sender_ID: bs.ID, Type: msgType, Payload: payload, Value: val}:
+			bs.MsgSent.Add(1)
+			if msgType == MSG_CONFLICT {
+				bs.ConflictsSent.Add(1)
+			}
 		default:
+			bs.MsgDropped.Add(1)
 		}
 	}
 }

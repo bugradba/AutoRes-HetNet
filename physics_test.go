@@ -2,117 +2,181 @@ package main
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 )
 
-const maxCapMbps = BandwidthHz * MaxSpectralEff / 1e6 // 160 Mbps
+// ============================================================
+// ANALİTİK PHY TESTLERİ (Y-2 doğrulaması)
+//
+// Fizik katmanı artık deterministik olduğu için (tüm rastgelelik
+// koşu başında dondurulur) kapasite, elle kurulmuş geometrilerde
+// kapalı-form beklentiyle BİREBİR karşılaştırılabilir.
+// ============================================================
 
-// makePair: a=(0,0), b=(x2,0), birbirinin komşusu iki istasyon.
-func makePair(x2 float64) []*BaseStation {
-	a := NewBaseStation(0, 0, 0)
-	b := NewBaseStation(1, x2, 0)
-	w := pathGain(math.Max(x2, 1))
-	a.NeighborWeights[b.ID] = w
-	b.NeighborWeights[a.ID] = w
-	a.Neighbros = []Agent_ID{b.ID}
-	b.Neighbros = []Agent_ID{a.ID}
-	return []*BaseStation{a, b}
+// phyStation: elle yerleştirilmiş, gölgelemesiz (çarpan=1) istasyon.
+func phyStation(id Agent_ID, x, y, ux, uy float64) *BaseStation {
+	bs := NewBaseStation(id, x, y)
+	bs.UserX, bs.UserY = ux, uy
+	bs.ServingShadow = 1.0
+	return bs
 }
 
-// makeChannel: deterministik kanal — her UE, kendi BS'inin +x yönünde
-// dServ metre uzağında; tüm gölgelemeler 1.0.
-func makeChannel(net []*BaseStation, dServ float64) *Channel {
-	n := len(net)
-	ch := &Channel{
-		UEX: make([]float64, n), UEY: make([]float64, n),
-		DServ:        make([]float64, n),
-		ServShadow:   make([]float64, n),
-		InterfShadow: make([]map[Agent_ID]float64, n),
+// TestCapacityNoInterference: girişimsiz, bilinen mesafede kapasite
+// kapalı-form Shannon değerine eşit olmalı (tavanlar tetiklenmeden).
+func TestCapacityNoInterference(t *testing.T) {
+	d := 120.0 // tavanların altında kalacak kadar uzak
+	bs := phyStation(0, 0, 0, d, 0)
+	net := []*BaseStation{bs}
+	colors := map[Agent_ID]PRB{0: 0}
+
+	got := CapacityForColor(bs, 0, net, colors)
+
+	sinr := TxPowerWatts * ReferenceLoss * math.Pow(d, -PathLossExponent) / NoiseWatts
+	sinr = math.Min(sinr, SINRCapLinear)
+	want := BandwidthHz * math.Min(math.Log2(1+sinr), SpectralEffCapBpsHz) / 1e6
+
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("kapasite: got %.9f, want %.9f Mbps", got, want)
 	}
-	for i, bs := range net {
-		ch.DServ[i] = dServ
-		ch.UEX[i] = bs.X + dServ
-		ch.UEY[i] = bs.Y
-		ch.ServShadow[i] = 1.0
-		ch.InterfShadow[i] = map[Agent_ID]float64{}
-		for nid := range bs.NeighborWeights {
-			ch.InterfShadow[i][nid] = 1.0
+}
+
+// TestSpectralEfficiencyCap: çok yakın kullanıcıda kapasite tam olarak
+// tavana (8 bps/Hz -> 20 MHz'te 160 Mbps) yapışmalı — asla üstüne çıkmamalı.
+func TestSpectralEfficiencyCap(t *testing.T) {
+	bs := phyStation(0, 0, 0, 1.0, 0) // 1 m: devasa SINR
+	net := []*BaseStation{bs}
+	colors := map[Agent_ID]PRB{0: 0}
+
+	got := CapacityForColor(bs, 0, net, colors)
+	want := BandwidthHz * SpectralEffCapBpsHz / 1e6 // 160 Mbps
+
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("SE tavanı: got %.6f, want %.6f Mbps", got, want)
+	}
+}
+
+// TestSINRCap: SINR 30 dB'de kırpılmalı. 30 dB tavan noktasının hemen
+// altında/üstünde iki geometri kurup üsttekinin kırpıldığını doğrular.
+func TestSINRCap(t *testing.T) {
+	// SINR(d) = P*L*d^-a / N = 1000 olduğunda d = (P*L/(N*1000))^(1/a)
+	dCap := math.Pow(TxPowerWatts*ReferenceLoss/(NoiseWatts*SINRCapLinear), 1.0/PathLossExponent)
+
+	closer := phyStation(0, 0, 0, dCap*0.5, 0) // SINR >> 1000 -> kırpılır
+	net := []*BaseStation{closer}
+	colors := map[Agent_ID]PRB{0: 0}
+	got := CapacityForColor(closer, 0, net, colors)
+	want := BandwidthHz * math.Min(math.Log2(1+SINRCapLinear), SpectralEffCapBpsHz) / 1e6
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("SINR tavanı: got %.6f, want %.6f Mbps", got, want)
+	}
+}
+
+// TestInterfererGeometry: girişim, BS->BS kenar ağırlığından DEĞİL,
+// girişimci-BS -> kullanıcı mesafesinden hesaplanmalı (Y-2'nin özü).
+func TestInterfererGeometry(t *testing.T) {
+	// Servis eden BS orijinde, kullanıcısı (50, 0)'da.
+	// Girişimci BS (80, 0)'da: BS->BS mesafesi 80 m ama
+	// girişimci->KULLANICI mesafesi yalnızca 30 m.
+	serving := phyStation(0, 0, 0, 50, 0)
+	interferer := phyStation(1, 80, 0, 200, 200) // kendi kullanıcısı ilgisiz
+
+	serving.Neighbros = []Agent_ID{1}
+	serving.NeighborWeights[1] = 12345.0 // kasıtlı saçma kenar ağırlığı:
+	// eski (hatalı) model bunu kullanırdı; yeni model kullanmamalı.
+	serving.InterfShadow[1] = 1.0
+
+	net := []*BaseStation{serving, interferer}
+	colors := map[Agent_ID]PRB{0: 0, 1: 0} // eş-kanal
+
+	got := CapacityForColor(serving, 0, net, colors)
+
+	sig := TxPowerWatts * ReferenceLoss * math.Pow(50, -PathLossExponent)
+	interf := TxPowerWatts * ReferenceLoss * math.Pow(30, -PathLossExponent) // 80-50=30 m
+	sinr := math.Min(sig/(interf+NoiseWatts), SINRCapLinear)
+	want := BandwidthHz * math.Min(math.Log2(1+sinr), SpectralEffCapBpsHz) / 1e6
+
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("girişim geometrisi: got %.9f, want %.9f Mbps", got, want)
+	}
+}
+
+// TestFailedStationZeroThroughput: renk atanmamış istasyon iletim
+// yapamaz; throughput'u 0 olmalı (eski 'Hata 4' şişirmesinin testi).
+func TestFailedStationZeroThroughput(t *testing.T) {
+	bs := phyStation(0, 0, 0, 30, 0)
+	net := []*BaseStation{bs}
+	if got := CapacityForColor(bs, -1, net, map[Agent_ID]PRB{0: -1}); got != 0 {
+		t.Fatalf("FAILED istasyon: got %.6f Mbps, want 0", got)
+	}
+}
+
+// TestFrozenChannelReproducible: aynı seed ile kurulan iki ağ, aynı
+// tahsis altında BİREBİR aynı throughput'u üretmeli ("seed-reproducible"
+// iddiasının fizik katmanındaki testi; eski kod bunu geçemezdi).
+func TestFrozenChannelReproducible(t *testing.T) {
+	build := func() []float64 {
+		rng := rand.New(rand.NewSource(123))
+		net := BuildNetwork(rng, 25, SimAreaSize, SimThreshold, false)
+		colors := FixedReuseAssignment(net) // deterministik tahsis
+		return ThroughputsForAssignment(net, colors)
+	}
+	a, b := build(), build()
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("istasyon %d: %.9f != %.9f (kanal donmamış!)", i, a[i], b[i])
 		}
 	}
-	return ch
 }
 
-// HATA 4 (1/2): hizmette olmayan (FAILED) istasyon 0 Mbps.
-func TestFailedStationHasZeroThroughput(t *testing.T) {
-	net := makePair(50)
-	ch := makeChannel(net, 50)
-	thr := ComputeThroughputs(net, []PRB{2, 3}, []bool{false, true}, ch)
-	if thr[0] != 0 {
-		t.Errorf("FAILED istasyon %.2f Mbps raporladı; 0 olmalıydı", thr[0])
+// TestBaselinesAssignEveryStation: baseline şemaları her istasyona
+// [0, K) aralığında geçerli bir renk atamalı.
+func TestBaselinesAssignEveryStation(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	net := BuildNetwork(rng, 30, SimAreaSize, SimThreshold, false)
+
+	schemes := map[string]map[Agent_ID]PRB{
+		"greedy": GreedyAssignment(net),
+		"dsatur": DSATURAssignment(net),
+		"fixed":  FixedReuseAssignment(net),
+		"random": RandomAssignment(net, rng),
 	}
-}
-
-// HATA 5.3: Girişimsiz linkte SNR = Ptx·G0·d^-α / N0B = 3.2e-8/1e-13 = 3.2e5
-// => SINR tavanı (1e3) bağlar => SE = min(log2(1001), 8) = 8 => tam 160 Mbps.
-func TestSpectralEfficiencyCapExact(t *testing.T) {
-	net := makePair(50)
-	ch := makeChannel(net, 50)
-	thr := ComputeThroughputs(net, []PRB{2, 3}, []bool{true, true}, ch) // farklı renk
-	if math.Abs(thr[0]-maxCapMbps) > 1e-9 {
-		t.Errorf("girişimsiz kapasite %.6f; tam %.1f beklenirdi (tavan)", thr[0], maxCapMbps)
-	}
-}
-
-// HATA 5.1 + analitik doğrulama: iki BS aynı noktada (x2=0), aynı renk.
-// dJU = dServ => I = S => SINR = S/(S+N) ≈ 1 => SE = log2(2) = 1 => 20 Mbps.
-func TestColocatedInterfererGivesOneBpsHz(t *testing.T) {
-	net := makePair(0) // b, a ile aynı noktada
-	ch := makeChannel(net, 50)
-	thr := ComputeThroughputs(net, []PRB{2, 2}, []bool{true, true}, ch)
-	want := BandwidthHz * 1.0 / 1e6 // 20 Mbps
-	if math.Abs(thr[0]-want) > 0.01 {
-		t.Errorf("dipteki girişimciyle kapasite %.4f; ~%.1f Mbps beklenirdi (SINR≈1)", thr[0], want)
-	}
-}
-
-// Girişimcinin UZAKLIĞI önemli (Hata 5.1'in özü): girişimci UE'den
-// uzaklaştıkça kapasite tekdüze artmalı (aynı donmuş kanalda).
-func TestInterferenceDecaysWithInterfererDistance(t *testing.T) {
-	prev := -1.0
-	// UE, a'nın +x yönünde x=50'de. x2 seçimleri interferer->UE mesafesini
-	// kesin artan yapar: dJU = 10, 100, 200, 400 m.
-	for _, x2 := range []float64{60, 150, 250, 450} {
-		net := makePair(x2)
-		ch := makeChannel(net, 50)
-		thr := ComputeThroughputs(net, []PRB{2, 2}, []bool{true, true}, ch)
-		if thr[0] <= prev {
-			t.Fatalf("girişimci uzaklaştıkça kapasite artmadı: x2=%.0f -> %.4f (önceki %.4f)", x2, thr[0], prev)
+	for name, colors := range schemes {
+		if len(colors) != len(net) {
+			t.Fatalf("%s: %d/%d istasyon renklendi", name, len(colors), len(net))
 		}
-		prev = thr[0]
+		for id, c := range colors {
+			if c < 0 || c >= MaxColors {
+				t.Fatalf("%s: BS-%d geçersiz renk %d", name, id, c)
+			}
+		}
 	}
 }
 
-// HATA 4 (2/2): FAILED komşu yayın yapamaz => girişim üretmemeli.
-// Aynı noktada, aynı renk 'istemiş' ama commit edememiş komşu: kapasite tavanda kalmalı.
-func TestFailedNeighborProducesNoInterference(t *testing.T) {
-	net := makePair(0)
-	net[1].NeighborMap[net[0].ID] = 2 // eski kodun zehirleyicisi (artık okunmuyor)
-	ch := makeChannel(net, 50)
-	thr := ComputeThroughputs(net, []PRB{2, 2}, []bool{true, false}, ch)
-	if math.Abs(thr[0]-maxCapMbps) > 1e-9 {
-		t.Errorf("FAILED komşu girişim üretmiş: %.4f Mbps (160 beklenirdi)", thr[0])
-	}
-}
+// TestDSATURProperColoringWhenPossible: K, üçgen grafın kromatik
+// sayısına (3) eşitken DSATUR sıfır maliyetli (uygun) renklendirme bulmalı.
+func TestDSATURProperColoringWhenPossible(t *testing.T) {
+	origK := MaxColors
+	defer func() { MaxColors = origK }()
+	MaxColors = 3
 
-// HATA 6: Donmuş kanalda TAHSİS farkı sonuca yansımalı — aynı kanal
-// üzerinde çakışmasız atama, tam-çakışmalı atamadan kesin iyi olmalı.
-func TestFrozenChannelIsolatesAllocationEffect(t *testing.T) {
-	net := makePair(30)
-	ch := makeChannel(net, 50)
-	served := []bool{true, true}
-	clash := ComputeThroughputs(net, []PRB{1, 1}, served, ch)
-	clean := ComputeThroughputs(net, []PRB{1, 2}, served, ch)
-	if !(clean[0] > clash[0] && clean[1] > clash[1]) {
-		t.Errorf("aynı kanalda çakışmasız atama üstün olmalıydı: clean=%v clash=%v", clean, clash)
+	// Üçgen: 3 istasyon, hepsi komşu.
+	a := phyStation(0, 0, 0, 10, 0)
+	b := phyStation(1, 10, 0, 20, 0)
+	c := phyStation(2, 5, 8, 15, 8)
+	link := func(x, y *BaseStation) {
+		x.NeighborWeights[y.ID] = 1e-9
+		y.NeighborWeights[x.ID] = 1e-9
+		x.Neighbros = append(x.Neighbros, y.ID)
+		y.Neighbros = append(y.Neighbros, x.ID)
+	}
+	link(a, b)
+	link(b, c)
+	link(a, c)
+
+	net := []*BaseStation{a, b, c}
+	colors := DSATURAssignment(net)
+	if cost := AssignmentCost(net, colors); cost != 0 {
+		t.Fatalf("DSATUR üçgeni 3 renkle uygun boyayamadı, maliyet=%.3e", cost)
 	}
 }
