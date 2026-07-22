@@ -26,6 +26,8 @@ func main() {
 	sweepN := flag.String("sweepN", "20,40,60,80", "tarama N değerleri (virgülle ayrık)")
 	timescale := flag.Float64("timescale", 1.0, "tüm protokol zamanlayıcılarını ölçekler (0.1 = 10x hızlı; oranlar korunur)")
 	csvPath := flag.String("csv", "sweep_results.csv", "sweep ham veri çıktısı (koşu başına satır)")
+	ablate := flag.Bool("ablate-idpriority", false, "ABLASYON: WAITING-WAITING ID-öncelik itirazını kapat (H-1'in fiilî etkisini yeniden üretir; önce/sonra deneyi için)")
+	ablateRecheck := flag.Bool("ablate-recheck", false, "ABLASYON: COMMITTED en-iyi-yanıt denetimini kapat (H-2 öncesi uç-durum protokolü)")
 	flag.Parse()
 
 	if *timescale <= 0 {
@@ -33,6 +35,14 @@ func main() {
 		os.Exit(1)
 	}
 	SetTimescale(*timescale)
+	AblateIDPriority = *ablate
+	AblateCommitRecheck = *ablateRecheck
+	if AblateIDPriority {
+		fmt.Println("!!! ABLASYON: ID-öncelik çekişme çözümü KAPALI (H-1 davranışı) !!!")
+	}
+	if AblateCommitRecheck {
+		fmt.Println("!!! ABLASYON: COMMITTED en-iyi-yanıt denetimi KAPALI (H-2 öncesi protokol) !!!")
+	}
 
 	if *sweep {
 		Verbose = false
@@ -102,16 +112,43 @@ func main() {
 
 	// ----------------------------------------------------
 
-	fmt.Println("\n--- CALCULATING NETWORK THROUGHPUT (SHANNON CAPACITY) ---")
+	fmt.Println("\n--- CALCULATING NETWORK THROUGHPUT (3GPP TR 38.901 UMa) ---")
+	fmt.Printf("fc=%.1f GHz | hBS=%.0f m | hUT=%.1f m | B=%.0f MHz | NF=%.0f dB | N=%.1f dBm\n",
+		CarrierFreqGHz, BSHeightM, UEHeightM, BandwidthHz/1e6, NoiseFigureDB,
+		10*math.Log10(NoisePowerWatts()*1000))
+	fmt.Printf("Tavanlar: SINR<=%.0f dB, spektral verim<=%.1f bps/Hz (=%.0f Mbps)\n\n",
+		SINRCapDB, SpectralEffCapBpsHz, BandwidthHz*SpectralEffCapBpsHz/1e6)
 
 	totalNetworkCapacity := 0.0
+	losCount, sinrSum, cappedCount := 0, 0.0, 0
+	byID := indexByID(Network)
+	colorsNow := ColorsOfNetwork(Network)
 
 	for _, bs := range Network {
 		bs.CalculateShannonCapacity(Network) // Hesapla ve Struct'a kaydet
 		totalNetworkCapacity += bs.Throughput
 
-		fmt.Printf("BS-%d | Color: %d | Throughput: %.2f Mbps\n", bs.ID, bs.CurrentPRB, bs.Throughput)
+		sinrDB := math.Inf(-1)
+		if s := SINRForColor(bs, bs.CurrentPRB, byID, colorsNow); s > 0 {
+			sinrDB = 10 * math.Log10(s)
+			sinrSum += sinrDB
+		}
+		state := "NLOS"
+		if bs.ServingLOS {
+			state = "LOS "
+			losCount++
+		}
+		if bs.Throughput >= BandwidthHz*SpectralEffCapBpsHz/1e6-1e-9 {
+			cappedCount++
+		}
+
+		fmt.Printf("BS-%d | Color: %d | %s | SINR: %6.2f dB | Throughput: %.2f Mbps\n",
+			bs.ID, bs.CurrentPRB, state, sinrDB, bs.Throughput)
 	}
+
+	fmt.Printf("\nPHY teşhis: LOS oranı %d/%d (%.0f%%) | ort. SINR %.2f dB | tavana dayanan %d/%d istasyon\n",
+		losCount, numDevice, 100*float64(losCount)/float64(numDevice),
+		sinrSum/float64(numDevice), cappedCount, numDevice)
 
 	fairnessScore := CalculateJainsFairness(Network)
 	globalObjective := CalculateGlobalObjective(Network)

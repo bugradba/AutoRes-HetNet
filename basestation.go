@@ -24,7 +24,8 @@ func NewBaseStation(id Agent_ID, x, y float64) *BaseStation {
 		ProposedPRB: -1,
 
 		NeighborWeights: make(map[Agent_ID]float64), // Haritayı başlatmak için
-		InterfShadow:    make(map[Agent_ID]float64), // Y-2: donmuş girişim gölgelemeleri
+		InterfLOS:       make(map[Agent_ID]bool),    // G2: donmuş LOS/NLOS durumları
+		InterfShadowDB:  make(map[Agent_ID]float64), // G2: donmuş girişim gölgelemeleri (dB)
 	}
 }
 
@@ -110,6 +111,9 @@ func (bs *BaseStation) Think() {
 		}(bestPick)
 
 	case STATE_COMMITTED:
+		if AblateCommitRecheck {
+			return // ablasyon: COMMITTED yeniden uç durum (eski protokol)
+		}
 		// ============================================================
 		// H-2 DÜZELTMESİ: COMMITTED artık uç (terminal) durum değil.
 		//
@@ -218,7 +222,7 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 			return
 		}
 		if bs.State == STATE_WAITING && bs.ProposedPRB == msg.Value {
-			if bs.ID > msg.Sender_ID {
+			if !AblateIDPriority && bs.ID > msg.Sender_ID {
 				if Verbose {
 					fmt.Printf("⚔ [BS-%d] Conflict! BS-%d'is rejecting (ID Priority).\n", bs.ID, msg.Sender_ID)
 				}

@@ -27,27 +27,50 @@ const (
 	STATE_COMMITTED
 )
 
-// --- TELEKOMÜNİKASYON FİZİK SABİTLERİ ---
+// --- FİZİK KATMANI: 3GPP TR 38.901 UMa (G2) ---
+//
+// Kanal modeli, tek üslü log-mesafe yaklaşımından 3GPP TR 38.901
+// (0.5-100 GHz) Urban Macro senaryosuna yükseltildi. Yayınlarda
+// kıyaslanabilirliğin ön koşulu standart bir kanal modelidir.
 const (
-	TxPowerWatts     = 40.0  // 46 dBm
-	NoiseWatts       = 1e-13 // -100 dBm (Biraz daha hassas)
-	BandwidthHz      = 20e6  // 20 MHz
-	ReferenceLoss    = 1e-4  // Sinyalin ilk metresindeki kayıp (-40dB)
-	PathLossExponent = 3.0   // Şehir içi ortam için sönümleme katsayısı
+	// Taşıyıcı ve anten geometrisi (TR 38.901 Tablo 7.2-1, UMa)
+	CarrierFreqGHz = 3.5  // fc: 5G NR n78 bandı
+	BSHeightM      = 25.0 // hBS: UMa makro anten yüksekliği
+	UEHeightM      = 1.5  // hUT: kullanıcı terminali yüksekliği
 
-	// Y-2 DÜZELTMESİ: gerçekçi PHY tavanları (README'nin vaadi).
-	SINRCapLinear       = 1000.0 // SINR <= 30 dB
-	SpectralEffCapBpsHz = 8.0    // <= 8 bps/Hz (20 MHz'te 160 Mbps tavanı)
+	// Verici ve alıcı zinciri
+	TxPowerWatts  = 40.0 // 46 dBm (20 MHz makro)
+	BandwidthHz   = 20e6 // B: 20 MHz
+	NoiseFigureDB = 7.0  // NF: alıcı gürültü şekli (N = -174 + 10log10(B) + NF)
 
-	// Donmuş kullanıcı yerleşimi: koşu başında tohumlu rng ile çizilir,
-	// istasyonun girişim durumuna GÖRE DEĞİL (eski "cell shrinkage"
-	// mekanizması metodolojik olarak savunulamazdı ve kaldırıldı).
+	// Gölgeleme std sapmaları (TR 38.901 Tablo 7.4.1-1)
+	ShadowSigmaLOSdB  = 4.0 // LOS bağlantılar
+	ShadowSigmaNLOSdB = 6.0 // NLOS bağlantılar
+
+	// Pratik alıcı tavanları
+	SINRCapDB           = 30.0 // SINR <= 30 dB
+	SpectralEffCapBpsHz = 7.4  // 5G NR 256-QAM pratik üst sınırı (20 MHz'te 148 Mbps)
+
+	// Donmuş kullanıcı yerleşimi. Alt sınır 10 m, TR 38.901'in
+	// geçerlilik aralığıdır (model d2D >= 10 m için tanımlıdır).
 	UserMinDist = 10.0
 	UserMaxDist = 150.0
+)
 
-	// Gölgeleme çarpanı: exp(sigma_ln * N(0,1)). Graf ağırlıklarıyla
-	// aynı model; hem serving hem girişim linklerine simetrik uygulanır.
-	ShadowSigmaLn = 0.5
+// --- OYUN GRAFI KUPLAJ SABİTLERİ ---
+//
+// DİKKAT: Aşağıdaki iki sabit YALNIZCA oyunun girişim grafını (BS<->BS
+// kenar ağırlıkları) kurmak için kullanılır ve SINR hesabına GİRMEZ.
+// Grafik ağırlığı, ajanların maliyet fonksiyonundaki soyut "kuplaj
+// şiddeti"dir; fiziksel değerlendirme (throughput/SINR) tamamen
+// 38.901 UMa ile ve gerçek girişimci->UE geometrisi üzerinden yapılır.
+// İki katmanın ayrı tutulması bilinçli bir tasarım tercihidir:
+// oyun grafı simetriktir (exact potential game koşulu), gerçek
+// girişim kuplajı ise yönlüdür.
+const (
+	CouplingRefLoss  = 1e-4 // 1 m referans kaybı (-40 dB)
+	CouplingExponent = 3.0  // graf kuplajı için sönümleme üssü
+	CouplingShadowLn = 0.5  // graf kuplajı log-normal gölgeleme parametresi
 )
 
 // --- ALGORİTMA SABİTLERİ ---
@@ -93,6 +116,21 @@ const (
 	SimThreshold = 100.0 // Komşuluk / girişim eşiği (metre)
 )
 
+// AblateIDPriority (deney anahtarı): true ise WAITING-WAITING
+// çekişmelerinde ID-öncelik itirazı GÖNDERİLMEZ — H-1 hatasının fiilî
+// etkisinin (itirazın ölü kod olması) kontrollü yeniden üretimi.
+// Amaç: "çekişme çözümünün ampirik değeri"ni mevcut HEAD'den tek
+// bayrakla, önce/sonra olarak raporlayabilmek (ablation study).
+var AblateIDPriority = false
+
+// AblateCommitRecheck (deney anahtarı): true ise COMMITTED durumdaki
+// periyodik en-iyi-yanıt denetimi (H-2 düzeltmesi) kapatılır; COMMITTED
+// yeniden uç durum olur. İki bayrak birlikte 2x2 ablasyon ızgarası kurar:
+//
+//	her ikisi açık  = mevcut protokol
+//	her ikisi kapalı = orijinal (H-1'li) protokolün fiilî davranışı
+var AblateCommitRecheck = false
+
 // Verbose: ajanların adım adım log basıp basmayacağı.
 // Tek koşuda eğitici; Monte Carlo'da (yüzlerce koşu) kapatılır,
 // aksi halde çıktı okunamaz hale gelir ve koşu yavaşlar.
@@ -120,14 +158,19 @@ type BaseStation struct {
 	Throughput      float64          // Mbps cinsinden veri hızı
 	BackoffUntil    time.Time        // CONFLICT sonrası bu ana kadar yeni teklif verme (kilitli uyku yerine)
 
-	// --- Y-2: DONMUŞ KANAL GERÇEKLEŞMESİ (frozen channel) ---
+	// --- G2: DONMUŞ KANAL GERÇEKLEŞMESİ (3GPP TR 38.901 UMa) ---
 	// Koşu başında deney rng'sinden BİR KEZ çizilir ve koşu boyunca
 	// sabittir. Böylece (i) aynı seed aynı throughput'u üretir,
 	// (ii) tüm tahsis şemaları AYNI kanal üzerinde karşılaştırılır
 	// (fark yalnızca tahsise atfedilebilir).
-	UserX, UserY  float64              // servis edilen kullanıcının konumu
-	ServingShadow float64              // serving link gölgeleme çarpanı
-	InterfShadow  map[Agent_ID]float64 // girişimci-BS -> BU kullanıcı gölgelemeleri
+	// Her bağlantı için LOS/NLOS durumu 38.901'in mesafeye bağlı LOS
+	// olasılığıyla çekilir; gölgeleme o duruma ait sigma ile (LOS 4 dB,
+	// NLOS 6 dB) üretilir ve dB cinsinden saklanır.
+	UserX, UserY    float64              // servis edilen kullanıcının konumu
+	ServingLOS      bool                 // serving link LOS mu?
+	ServingShadowDB float64              // serving link gölgeleme (dB)
+	InterfLOS       map[Agent_ID]bool    // girişimci-BS -> BU kullanıcı: LOS mu?
+	InterfShadowDB  map[Agent_ID]float64 // girişimci-BS -> BU kullanıcı: gölgeleme (dB)
 
 	// --- Y-4: MESAJ SAYAÇLARI ---
 	// Send, ana goroutine dışındaki commit-zamanlayıcı goroutine'lerinden

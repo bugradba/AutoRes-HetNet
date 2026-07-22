@@ -17,7 +17,7 @@ The cell-as-player, color-as-frequency idea is well established in the potential
 - **Genuinely asynchronous and message-based.** Agents communicate through a 4-message protocol (`HELLO`, `PROPOSE`, `SUCCESS`, `CONFLICT`) over Go channels, with random start delays, message races, timeouts and queue drops — not the synchronous round-based or "one player moves at a time" abstraction most prior work assumes.
 - **Contention resolution inside the protocol.** ID-priority plus random backoff (CSMA-like) resolves same-color proposal races. Because interference is a *cost* rather than a hard constraint, a station that is objected to may insist when the contested color is still strictly its cheapest option — this prevents the objection/backoff livelock that a hard veto would create in a weighted game.
 - **Commitment is revisable.** `COMMITTED` stations keep re-evaluating their best response against their current neighbor view and re-enter the proposal game whenever they can strictly improve. Convergence is declared only after a network-wide quiet window, and the resulting allocation is then *audited* for the Nash property against ground-truth colors.
-- **End-to-end physical layer.** The color assignment is carried through a log-distance + log-normal shadowing channel to per-user downlink SINR, capped Shannon capacity, and Jain fairness — not just "conflict counts".
+- **End-to-end physical layer on a standard channel model.** The color assignment is carried through a **3GPP TR 38.901 Urban Macro** channel (distance-dependent LOS probability, LOS/NLOS path loss with breakpoint, LOS 4 dB / NLOS 6 dB shadowing) to per-user downlink SINR, capped Shannon capacity, cell-edge (5th-percentile) rate and Jain fairness — not just "conflict counts". The path-loss, LOS-probability and noise equations are unit-tested against the standard's closed forms.
 
 ## Key empirical findings
 
@@ -31,7 +31,9 @@ All numbers below come from seeded Monte Carlo experiments with 95% confidence i
 
 **4. Zero interference is a property of the graph, not of the algorithm.** Interference reaches exactly zero only when K ≥ the interference graph's chromatic number: measured 80% of runs at N=20, K=5, and 0% in the tested N=40 cells (K=3 and K=5). In dense regimes the algorithm *minimizes* interference; it cannot eliminate it. (An earlier version of this repository claimed unconditional zero interference from a single lucky run; that claim was wrong and is retracted.)
 
-**5. Near-centralized quality without a controller.** On identical frozen channel realizations (same user positions, same shadowing draws — so differences are attributable to the allocation alone), the distributed equilibrium is statistically indistinguishable from centralized heuristics and far above naive schemes. Measured with `go run . -runs 10` (seed 42; capacity capped at 160 Mbps by the 8 bps/Hz spectral-efficiency ceiling):
+**5. Cell-edge users are where allocation actually matters.** Under TR 38.901 UMa most cell-centre users saturate the 7.4 bps/Hz ceiling regardless of allocation, so *mean* throughput is a blunt instrument: distributed, greedy and DSATUR sit within a few Mbps of each other. The 5th-percentile (cell-edge) rate separates them sharply — and separates all of them from the naive schemes by more than an order of magnitude, because under fixed reuse and random allocation the worst-served users are effectively in outage (sub-1 Mbps). Cell-edge rate, not mean rate, is the metric to lead with.
+
+**6. Near-centralized quality without a controller.** On identical frozen channel realizations (same user positions, same shadowing draws — so differences are attributable to the allocation alone), the distributed equilibrium is statistically indistinguishable from centralized heuristics and far above naive schemes. Measured with `go run . -runs 10` (seed 42; capacity capped at 160 Mbps by the 8 bps/Hz spectral-efficiency ceiling):
 
 | Scheme | Conflict cost (W) | Mbps / served user | Jain |
 |---|---|---|---|
@@ -41,7 +43,20 @@ All numbers below come from seeded Monte Carlo experiments with 95% confidence i
 | Fixed reuse (i mod K) | 4.56e-08 ± 2.1e-08 | 74.6 ± 4.3 | 0.57 |
 | Random | 4.06e-07 ± 5.9e-07 | 69.3 ± 5.3 | 0.53 |
 
+**7. Ablation: what each mechanism actually buys.** The two protocol mechanisms can be switched off independently (`-ablate-idpriority`, `-ablate-recheck`), reconstructing the original (pre-fix) protocol from current HEAD. 10 paired runs (seed 42, identical topologies/channels across arms):
+
+| ID-priority | Post-commit re-evaluation | Interference (W) | NE-verified runs | Rounds |
+|---|---|---|---|---|
+| ✗ | ✗ *(original protocol)* | 4.3e-09 ± 2.6e-09 | 0/10 | 8.0 |
+| ✓ | ✗ *(H-1 fix only)* | 2.3e-09 ± 5.8e-10 | 0/10 | 8.1 |
+| ✗ | ✓ | 1.7e-09 ± 4.2e-10 | 10/10 | 14.3 |
+| ✓ | ✓ *(current)* | 1.6e-09 ± 4.2e-10 | 10/10 | 15.9 |
+
+Three take-aways: (i) contention resolution alone roughly halves residual interference but **cannot** deliver equilibria (0/10 NE without re-evaluation); (ii) re-evaluation is what turns the protocol into an equilibrium-finding dynamic, at the price of ~2× more rounds; (iii) the retracted "constant ~8-round convergence" of earlier versions is exactly reproduced by the ablated arms — it was an artifact of declaring convergence at terminal commitment instead of verifying equilibrium.
+
 Regenerate paper-grade numbers with `go run . -runs 200` (topologies and channels are seed-reproducible; asynchronous message races are inherently not, which is part of what is being measured).
+
+**8. Paired analysis: the comparison the design actually licenses.** All schemes are evaluated within the same run, on the same topology and the same frozen channel, so per-run *differences* are the statistically correct unit — topology luck, which dominates the variance, cancels out. The Monte Carlo summary therefore reports paired differences (mean, median, 95% CI, paired t-test, win counts) alongside the marginal table. This matters: independent confidence intervals on the marginals overlap heavily and suggest "indistinguishable", while the paired test resolves the ordering. Both the mean and the median difference are reported, because a mean difference driven by a handful of outlier runs tells a different story than a consistent per-run advantage — and with 60 runs the two comparisons closest to zero (vs. greedy, vs. DSATUR) can flip between marginal significance and non-significance across independent replications. Report the paired table at `-runs 200`, and read the median and win count next to the mean rather than the p-value alone.
 
 ## Metrics: what they mean (and what they don't)
 
@@ -55,7 +70,7 @@ Regenerate paper-grade numbers with `go run . -runs 200` (topologies and channel
 |---|---|
 | `types.go` | Types, protocol/PHY constants, scalable protocol timers, message counters |
 | `basestation.go` | Agent lifecycle, best response, message handling, contention resolution |
-| `physics.go` | Frozen-channel downlink SINR / capped Shannon capacity model |
+| `physics.go` | 3GPP TR 38.901 UMa channel: LOS probability, LOS/NLOS path loss, frozen-channel SINR and capped Shannon capacity |
 | `metrics.go` | Jain index, global objective, greedy baseline wrapper |
 | `baselines.go` | Greedy, DSATUR, fixed-reuse and random allocators (shared cost definition) |
 | `optimum.go` | Exact social optimum via branch-and-bound |
@@ -89,13 +104,16 @@ python plot_sweep.py sweep_results.csv sweep
 | `-optbudget` | 3s | Time budget per run for the exact-optimum solver |
 | `-csv` | `sweep_results.csv` | Sweep raw-data output (per-run rows; CDFs are plotted from this) |
 | `-v` | false | Agent-level logging (single-run mode only) |
+| `-ablate-idpriority` | false | Ablation: disable WAITING-WAITING ID-priority objections (reproduces the effective behavior of the historical H-1 bug) |
+| `-ablate-recheck` | false | Ablation: make `COMMITTED` terminal again (pre-re-evaluation protocol) |
 
 ## Methodology notes
 
 - **Logical convergence, not wall clock.** A run ends when every station is `COMMITTED` *and* no station changed state or color for a full quiet window (with a safety cap) — an instantaneous all-committed snapshot is not sufficient once commitments are revisable. Convergence time is the moment of the last observed change, reported in protocol rounds (think-periods) — a timescale-invariant unit. Every converged run is additionally audited for the Nash property.
 - **Frozen channels.** All allocation schemes in a run are evaluated on one channel realization (user positions + all shadowing draws), isolating the allocation effect from placement luck.
-- **Physical model.** Downlink SINR at the user position; interference from actually-transmitting (committed) co-channel neighbors over the true interferer→UE geometry; shadowing on serving and interfering links symmetrically; SINR ≤ 30 dB and spectral efficiency ≤ 8 bps/Hz caps.
-- **Simulation parameters** (single source of truth in `types.go`): N=40, area 400×400 m, neighbor threshold 100 m, K=5, Ptx=40 W, B=20 MHz, α=3.0, log-normal shadowing.
+- **Physical model — 3GPP TR 38.901 UMa.** fc = 3.5 GHz, hBS = 25 m, hUT = 1.5 m, Ptx = 46 dBm, B = 20 MHz. Each link's LOS state is drawn from the standard's distance-dependent LOS probability (Table 7.4.2-1); path loss follows Table 7.4.1-1 (LOS two-slope with breakpoint d'BP; NLOS as max(PL_LOS, PL'_NLOS)); shadowing is log-normal with σ = 4 dB (LOS) / 6 dB (NLOS). Noise is N = −174 + 10·log10(B) + NF dBm with NF = 7 dB. Downlink SINR is evaluated at the user position, with interference from actually-transmitting (committed) co-channel neighbors over the true interferer→UE geometry. Caps: SINR ≤ 30 dB, spectral efficiency ≤ 7.4 bps/Hz (5G NR 256-QAM practical limit ⇒ 148 Mbps at 20 MHz).
+- **Game graph vs. physical layer are deliberately separate.** BS↔BS edge weights define the *game* (a symmetric coupling proxy — symmetry is what makes this an exact potential game). They never enter the SINR computation, which uses only interferer→UE geometry. A unit test asserts that perturbing an edge weight by 1000× leaves throughput unchanged.
+- **Simulation parameters** (single source of truth in `types.go`): N=40, area 400×400 m, neighbor threshold 100 m, K=5, Ptx=40 W (46 dBm), B=20 MHz, UE distance 10–150 m. Channel: TR 38.901 UMa as above.
 
 ## Limitations and future work
 
