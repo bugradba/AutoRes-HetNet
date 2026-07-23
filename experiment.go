@@ -31,40 +31,36 @@ import (
 
 // BuildNetwork: eski main() içindeki topoloji kurulumunun, tohumlu
 // rng kullanan tekrarlanabilir hali. Aynı seed => aynı topoloji.
+//
+// A1 DÜZELTMESİ — KURULUM SIRASI DEĞİŞTİ:
+// Kenar ağırlıkları artık donmuş kanaldan türetildiği için üç aşama
+// birbirinden ayrıldı:
+//  1. Komşuluk (kim kiminle konuşuyor)  — mesafe eşiğiyle
+//  2. Donmuş kanal (UE, LOS, gölgeleme) — 38.901 ile
+//  3. Kenar ağırlıkları                 — kanaldan (fiziksel mod)
 func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bool) []*BaseStation {
 	net := make([]*BaseStation, n)
 	for i := 0; i < n; i++ {
 		net[i] = NewBaseStation(Agent_ID(i), rng.Float64()*areaSize, rng.Float64()*areaSize)
 	}
 
+	// --- AŞAMA 1: KOMŞULUK GRAFI ---
+	// Eşik yalnızca "kim kiminle mesaj alışverişi yapıyor" sorusunu
+	// yanıtlar; ağırlıklar 3. aşamada hesaplanır.
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			dist := Distance(net[i], net[j])
-
-			// Eşik değer kontrolü (Menzil dışındaysa hesaplama yapma)
-			if dist < threshold {
-				baseWeight := CouplingRefLoss * math.Pow(dist, -CouplingExponent)
-				shadowing := math.Exp(rng.NormFloat64() * CouplingShadowLn)
-				finalWeight := baseWeight * shadowing
-
-				net[i].NeighborWeights[net[j].ID] = finalWeight
-				net[j].NeighborWeights[net[i].ID] = finalWeight
-
+			if Distance(net[i], net[j]) < threshold {
 				net[i].Neighbros = append(net[i].Neighbros, net[j].ID)
 				net[j].Neighbros = append(net[j].Neighbros, net[i].ID)
 
 				net[i].Outbox[net[j].ID] = net[j].Inbox
 				net[j].Outbox[net[i].ID] = net[i].Inbox
-
-				if verbose {
-					fmt.Printf("Link: BS-%d <--> BS-%d | Dist: %.1fm | Shadowing: %.2fx | Final Weight: %.3e\n",
-						i, j, dist, shadowing, finalWeight)
-				}
 			}
 		}
 	}
+
 	// ============================================================
-	// G2: DONMUŞ KANAL GERÇEKLEŞMESİ (3GPP TR 38.901 UMa)
+	// AŞAMA 2 — G2: DONMUŞ KANAL GERÇEKLEŞMESİ (3GPP TR 38.901 UMa)
 	// Kullanıcı konumları, LOS/NLOS durumları ve TÜM gölgeleme
 	// çekilişleri koşu başında, deney rng'sinden BİR KEZ çizilir:
 	//   - Aynı seed => aynı kanal => aynı throughput (tekrarlanabilir).
@@ -97,7 +93,102 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 			bs.InterfShadowDB[neighborID] = rng.NormFloat64() * ShadowSigmaDB(los)
 		}
 	}
+
+	// --- AŞAMA 3: KENAR AĞIRLIKLARI ---
+	assignCouplingWeights(net, rng, verbose)
 	return net
+}
+
+// assignCouplingWeights: oyunun maliyet fonksiyonunu tanımlayan
+// simetrik kenar ağırlıklarını hesaplar.
+//
+// ============================================================
+// A1 DÜZELTMESİ: FİZİKSEL KUPLAJ AĞIRLIĞI
+//
+// SORUN: Eski ağırlık, BS<->BS mesafesinden türeyen geometrik bir
+// vekildi. Ama gerçek girişim, girişimci istasyonun KULLANICIYA olan
+// mesafesine bağlıdır. İkisi sistematik olarak ayrışır: oyun toplam
+// ağırlıklı çakışmayı minimize ederken çakışmaları EN ZAYIF kenarlara
+// iter; zayıf kenar ise "BS'ler birbirinden uzak" demektir ve tam da
+// BS<->BS vekilinin en güvenilmez olduğu durumdur. Ölçülen örnek
+// (seed 42): BS-11 ile BS-27 arasındaki kenar graftaki en zayıfıydı
+// (5.27e-11, oyun için "bedava"), oysa BS-27 BS-11'in kullanıcısına
+// 8.4 m mesafede ve LOS'tu — fiziksel olarak felaket.
+//
+// ÇÖZÜM: Ağırlığı, kenarın ürettiği İKİ YÖNLÜ fiziksel girişim gücü
+// olarak tanımla:
+//
+//	w_ij = Ptx · [ G(j -> UE_i) + G(i -> UE_j) ]
+//
+// Bu tanım:
+//   - FİZİKSELDİR: birimi Watt'tır. Dahası, potansiyel fonksiyonu
+//     (eş-kanal çiftler üzerindeki toplam) TAM OLARAK ağın toplam
+//     eş-kanal girişim gücüne eşittir: Φ = Σ_çiftler w_ij.
+//   - DIŞSALLIĞI İÇSELLEŞTİRİR: bir istasyonun maliyeti
+//     c_i = Σ_{j eş-kanal} w_ij, hem KENDİ ÇEKTİĞİ hem de KOMŞULARINA
+//     VERDİĞİ girişimi içerir. Oyunun sosyal maliyeti tam potansiyel
+//     yapan şey tam olarak budur: Δc_i = ΔΦ.
+//   - SİMETRİKTİR: iki yönün ortalaması olduğu için w_ij = w_ji.
+//     Simetri, oyunun exact potential game olmasının ve H-2'deki
+//     yakınsama argümanının ön koşuludur; gerçek girişim yönlü
+//     olduğundan (G(j->UE_i) != G(i->UE_j)) ortalama almak, potansiyel
+//     yapıyı korumanın en az bilgi kaybettiren yoludur.
+//   - AYNI KANALDAN TÜREDİĞİ İÇİN TUTARLIDIR: ajanların optimize
+//     ettiği nicelik ile değerlendirmede ölçülen nicelik aynı fiziksel
+//     modelden gelir.
+//
+// Eski geometrik tanım, kontrollü karşılaştırma (ablasyon) için
+// -coupling geometric bayrağıyla korunmuştur.
+// ============================================================
+func assignCouplingWeights(net []*BaseStation, rng *rand.Rand, verbose bool) {
+	byID := indexByID(net)
+
+	for i := 0; i < len(net); i++ {
+		bs := net[i]
+		for _, nid := range bs.Neighbros {
+			if nid < bs.ID {
+				continue // her kenarı bir kez işle (i < j)
+			}
+			other := byID[nid]
+
+			// Gölgeleme çekilişi HER İKİ modda da yapılır (yalnızca
+			// geometric modda kullanılır). Böylece rng akışı modlar
+			// arasında birebir hizalı kalır: aynı seed, iki modda da
+			// aynı topolojiyi ve aynı donmuş kanalı üretir. Bu,
+			// -coupling ablasyonunun eşleştirilmiş (paired) bir deney
+			// olmasının ön koşuludur.
+			geoShadow := math.Exp(rng.NormFloat64() * CouplingShadowLn)
+
+			var w float64
+			var detail string
+
+			if CouplingMode == CouplingGeometric {
+				// ESKİ (ablasyon) TANIM: BS<->BS geometrik vekil.
+				d := Distance(bs, other)
+				w = CouplingRefLoss * math.Pow(d, -CouplingExponent) * geoShadow
+				detail = fmt.Sprintf("Dist: %.1fm | Shadowing: %.2fx", d, geoShadow)
+			} else {
+				// FİZİKSEL TANIM: iki yönlü girişim gücünün ortalaması.
+				// Kanal durumları (LOS + gölgeleme) 2. aşamada donduruldu.
+				dToMyUE := dist2D(other.X, other.Y, bs.UserX, bs.UserY)
+				dToItsUE := dist2D(bs.X, bs.Y, other.UserX, other.UserY)
+
+				gainToMyUE := LinkGain(dToMyUE, bs.InterfLOS[nid], bs.InterfShadowDB[nid])
+				gainToItsUE := LinkGain(dToItsUE, other.InterfLOS[bs.ID], other.InterfShadowDB[bs.ID])
+
+				w = TxPowerWatts * (gainToMyUE + gainToItsUE)
+				detail = fmt.Sprintf("BS-BS: %.1fm | ->UE_i: %.1fm | ->UE_j: %.1fm",
+					Distance(bs, other), dToMyUE, dToItsUE)
+			}
+
+			bs.NeighborWeights[nid] = w
+			other.NeighborWeights[bs.ID] = w
+
+			if verbose {
+				fmt.Printf("Link: BS-%d <--> BS-%d | %s | Weight: %.3e\n", bs.ID, nid, detail, w)
+			}
+		}
+	}
 }
 
 // AllCommitted: tüm istasyonlar COMMITTED mi? (Mutex ile güvenli okuma;

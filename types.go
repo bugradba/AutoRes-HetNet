@@ -57,7 +57,32 @@ const (
 	UserMaxDist = 150.0
 )
 
-// --- OYUN GRAFI KUPLAJ SABİTLERİ ---
+// --- A1: KUPLAJ MODU (oyunun maliyet fonksiyonu) ---
+//
+// physical  : w_ij = ½·Ptx·[G(j->UE_i) + G(i->UE_j)]  (varsayılan)
+//
+//	Fiziksel, simetrik, 38.901 kanalından türetilir.
+//
+// geometric : w_ij = C·d_ij^(-α)·gölgeleme  (eski/ablasyon)
+//
+//	BS<->BS mesafesine dayanan geometrik vekil.
+type CouplingKind int
+
+const (
+	CouplingPhysical CouplingKind = iota
+	CouplingGeometric
+)
+
+var CouplingMode = CouplingPhysical
+
+func (c CouplingKind) String() string {
+	if c == CouplingGeometric {
+		return "geometric"
+	}
+	return "physical"
+}
+
+// --- OYUN GRAFI KUPLAJ SABİTLERİ (yalnızca geometric mod) ---
 //
 // DİKKAT: Aşağıdaki iki sabit YALNIZCA oyunun girişim grafını (BS<->BS
 // kenar ağırlıkları) kurmak için kullanılır ve SINR hesabına GİRMEZ.

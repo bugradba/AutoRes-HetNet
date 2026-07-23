@@ -56,7 +56,27 @@ Three take-aways: (i) contention resolution alone roughly halves residual interf
 
 Regenerate paper-grade numbers with `go run . -runs 200` (topologies and channels are seed-reproducible; asynchronous message races are inherently not, which is part of what is being measured).
 
-**8. Paired analysis: the comparison the design actually licenses.** All schemes are evaluated within the same run, on the same topology and the same frozen channel, so per-run *differences* are the statistically correct unit — topology luck, which dominates the variance, cancels out. The Monte Carlo summary therefore reports paired differences (mean, median, 95% CI, paired t-test, win counts) alongside the marginal table. This matters: independent confidence intervals on the marginals overlap heavily and suggest "indistinguishable", while the paired test resolves the ordering. Both the mean and the median difference are reported, because a mean difference driven by a handful of outlier runs tells a different story than a consistent per-run advantage — and with 60 runs the two comparisons closest to zero (vs. greedy, vs. DSATUR) can flip between marginal significance and non-significance across independent replications. Report the paired table at `-runs 200`, and read the median and win count next to the mean rather than the p-value alone.
+**8. The cost function was mispricing interference — and fixing it doubled cell-edge throughput.** The game's edge weights were originally a *geometric proxy*: coupling strength inferred from BS↔BS distance. But interference is felt at the *user*, and the two diverge systematically. A weak edge means "the base stations are far apart" — which is exactly the regime where BS↔BS distance says least about how close the interferer sits to the victim's user. Since the game pushes collisions onto the weakest edges by construction, it was systematically colliding precisely where its own cost model was least reliable. In one measured topology the weakest edge in the entire graph (essentially free, in the game's view) connected two stations whose interferer sat **8.4 m from the victim's user in line-of-sight**.
+
+The fix is to define the weight as the physical two-way interference power under the same frozen 38.901 channel the evaluation uses:
+
+```
+w_ij = Ptx · [ G(j → UE_i) + G(i → UE_j) ]
+```
+
+This is symmetric by construction, so the exact-potential structure (and with it the convergence argument) survives. Two properties make it more than a re-parameterisation, and both are unit-tested: the potential function now equals *exactly* the network's total co-channel interference power, and each station's cost includes the interference it **causes** as well as the interference it **suffers** — the externality is internalised, which is precisely why the social cost is an exact potential.
+
+Ablation over 60 paired runs (`-coupling geometric` vs `-coupling physical`, identical seeds, topologies and channel realisations — the allocation-blind baselines are byte-identical across arms, which verifies the pairing):
+
+| Distributed (NE) | Geometric proxy | Physical coupling |
+|---|---|---|
+| Mean user rate | 125.8 ± 2.3 Mbps | 131.1 ± 2.3 Mbps |
+| Cell-edge (5th pct) | 18.4 ± 7.4 Mbps | **43.1 ± 10.9 Mbps** |
+| Jain | 0.876 ± 0.014 | 0.912 ± 0.013 |
+
+Cell-edge rate more than doubles at zero protocol cost — same messages, same convergence behaviour, only a better-posed objective. Every weight-aware scheme benefits (centralized greedy and DSATUR improve too, since they consume the same weights); fixed reuse and random are unchanged, as they ignore weights entirely. DSATUR still leads on throughput despite the distributed solution now achieving *lower* weighted cost, which is itself informative: minimising summed interference is not the same as maximising capped log-rate, and a scheme that spreads interference evenly can beat one that minimises its total while concentrating it on a few victims.
+
+**9. Paired analysis: the comparison the design actually licenses.** All schemes are evaluated within the same run, on the same topology and the same frozen channel, so per-run *differences* are the statistically correct unit — topology luck, which dominates the variance, cancels out. The Monte Carlo summary therefore reports paired differences (mean, median, 95% CI, paired t-test, win counts) alongside the marginal table. This matters: independent confidence intervals on the marginals overlap heavily and suggest "indistinguishable", while the paired test resolves the ordering. Both the mean and the median difference are reported, because a mean difference driven by a handful of outlier runs tells a different story than a consistent per-run advantage — and with 60 runs the two comparisons closest to zero (vs. greedy, vs. DSATUR) can flip between marginal significance and non-significance across independent replications. Report the paired table at `-runs 200`, and read the median and win count next to the mean rather than the p-value alone.
 
 ## Metrics: what they mean (and what they don't)
 
@@ -104,6 +124,7 @@ python plot_sweep.py sweep_results.csv sweep
 | `-optbudget` | 3s | Time budget per run for the exact-optimum solver |
 | `-csv` | `sweep_results.csv` | Sweep raw-data output (per-run rows; CDFs are plotted from this) |
 | `-v` | false | Agent-level logging (single-run mode only) |
+| `-coupling` | physical | Game cost function: `physical` (two-way interference power under the frozen channel) or `geometric` (legacy BS↔BS distance proxy, for ablation) |
 | `-ablate-idpriority` | false | Ablation: disable WAITING-WAITING ID-priority objections (reproduces the effective behavior of the historical H-1 bug) |
 | `-ablate-recheck` | false | Ablation: make `COMMITTED` terminal again (pre-re-evaluation protocol) |
 
@@ -112,7 +133,7 @@ python plot_sweep.py sweep_results.csv sweep
 - **Logical convergence, not wall clock.** A run ends when every station is `COMMITTED` *and* no station changed state or color for a full quiet window (with a safety cap) — an instantaneous all-committed snapshot is not sufficient once commitments are revisable. Convergence time is the moment of the last observed change, reported in protocol rounds (think-periods) — a timescale-invariant unit. Every converged run is additionally audited for the Nash property.
 - **Frozen channels.** All allocation schemes in a run are evaluated on one channel realization (user positions + all shadowing draws), isolating the allocation effect from placement luck.
 - **Physical model — 3GPP TR 38.901 UMa.** fc = 3.5 GHz, hBS = 25 m, hUT = 1.5 m, Ptx = 46 dBm, B = 20 MHz. Each link's LOS state is drawn from the standard's distance-dependent LOS probability (Table 7.4.2-1); path loss follows Table 7.4.1-1 (LOS two-slope with breakpoint d'BP; NLOS as max(PL_LOS, PL'_NLOS)); shadowing is log-normal with σ = 4 dB (LOS) / 6 dB (NLOS). Noise is N = −174 + 10·log10(B) + NF dBm with NF = 7 dB. Downlink SINR is evaluated at the user position, with interference from actually-transmitting (committed) co-channel neighbors over the true interferer→UE geometry. Caps: SINR ≤ 30 dB, spectral efficiency ≤ 7.4 bps/Hz (5G NR 256-QAM practical limit ⇒ 148 Mbps at 20 MHz).
-- **Game graph vs. physical layer are deliberately separate.** BS↔BS edge weights define the *game* (a symmetric coupling proxy — symmetry is what makes this an exact potential game). They never enter the SINR computation, which uses only interferer→UE geometry. A unit test asserts that perturbing an edge weight by 1000× leaves throughput unchanged.
+- **Game cost is physically grounded (`-coupling physical`, default).** Edge weights are the two-way interference power `w_ij = Ptx·[G(j→UE_i) + G(i→UE_j)]` under the same frozen channel used for evaluation, so the potential function equals the network's total co-channel interference power and each station internalises the interference it causes. Symmetry — the exact-potential condition — is preserved by construction. The historical geometric proxy (BS↔BS distance) is retained as `-coupling geometric` for ablation. Edge weights still never enter the SINR computation itself, which uses only interferer→UE geometry; a unit test asserts that perturbing a weight by 1000× leaves throughput unchanged.
 - **Simulation parameters** (single source of truth in `types.go`): N=40, area 400×400 m, neighbor threshold 100 m, K=5, Ptx=40 W (46 dBm), B=20 MHz, UE distance 10–150 m. Channel: TR 38.901 UMa as above.
 
 ## Limitations and future work

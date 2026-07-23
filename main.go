@@ -27,6 +27,7 @@ func main() {
 	timescale := flag.Float64("timescale", 1.0, "tüm protokol zamanlayıcılarını ölçekler (0.1 = 10x hızlı; oranlar korunur)")
 	csvPath := flag.String("csv", "sweep_results.csv", "sweep ham veri çıktısı (koşu başına satır)")
 	ablate := flag.Bool("ablate-idpriority", false, "ABLASYON: WAITING-WAITING ID-öncelik itirazını kapat (H-1'in fiilî etkisini yeniden üretir; önce/sonra deneyi için)")
+	coupling := flag.String("coupling", "physical", "oyun grafı kenar ağırlığı: physical (½·Ptx·[G(j->UE_i)+G(i->UE_j)]) | geometric (eski BS<->BS vekili)")
 	ablateRecheck := flag.Bool("ablate-recheck", false, "ABLASYON: COMMITTED en-iyi-yanıt denetimini kapat (H-2 öncesi uç-durum protokolü)")
 	flag.Parse()
 
@@ -35,6 +36,17 @@ func main() {
 		os.Exit(1)
 	}
 	SetTimescale(*timescale)
+	switch *coupling {
+	case "physical":
+		CouplingMode = CouplingPhysical
+	case "geometric":
+		CouplingMode = CouplingGeometric
+		fmt.Println("!!! ABLASYON: kenar ağırlıkları GEOMETRİK vekil (A1 öncesi tanım) !!!")
+	default:
+		fmt.Println("HATA: -coupling yalnızca 'physical' veya 'geometric' olabilir")
+		os.Exit(1)
+	}
+
 	AblateIDPriority = *ablate
 	AblateCommitRecheck = *ablateRecheck
 	if AblateIDPriority {
