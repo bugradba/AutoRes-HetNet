@@ -1,3 +1,5 @@
+[![CI](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml/badge.svg)](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml)
+
 # AutoRes-HetNet
 \n[![CI](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml/badge.svg)](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml)
 \n[![CI](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml/badge.svg)](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml)
