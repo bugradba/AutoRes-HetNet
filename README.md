@@ -1,8 +1,6 @@
 [![CI](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml/badge.svg)](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml)
 
 # AutoRes-HetNet
-\n[![CI](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml/badge.svg)](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml)
-\n[![CI](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml/badge.svg)](https://github.com/bugradba/AutoRes-HetNet/actions/workflows/ci.yml)
 
 **Distributed PRB allocation for ultra-dense 5G networks via an asynchronous, message-passing Graph Coloring Game — implemented in Go.**
 
