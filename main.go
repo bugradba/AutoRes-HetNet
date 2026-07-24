@@ -27,6 +27,9 @@ func main() {
 	timescale := flag.Float64("timescale", 1.0, "tüm protokol zamanlayıcılarını ölçekler (0.1 = 10x hızlı; oranlar korunur)")
 	csvPath := flag.String("csv", "sweep_results.csv", "sweep ham veri çıktısı (koşu başına satır)")
 	ablate := flag.Bool("ablate-idpriority", false, "ABLASYON: WAITING-WAITING ID-öncelik itirazını kapat (H-1'in fiilî etkisini yeniden üretir; önce/sonra deneyi için)")
+	picoFrac := flag.Float64("pico-fraction", PicoFraction, "HetNet: istasyonların piko (1 W/10 m) olma oranı; 0 = homojen makro ağ")
+	interfRadius := flag.Float64("interf-radius", InterfRadius, "fiziksel girişim yarıçapı (m); girişim bu yarıçap içindeki TÜM eş-kanal istasyonlardan toplanır (oyun eşiğinden bağımsız, A2)")
+	nStations := flag.Int("N", SimN, "istasyon sayısı (küçük N ör. 12, B&B optimumunu her koşuda kanıtlar => güvenilir PoA)")
 	coupling := flag.String("coupling", "physical", "oyun grafı kenar ağırlığı: physical (½·Ptx·[G(j->UE_i)+G(i->UE_j)]) | geometric (eski BS<->BS vekili)")
 	ablateRecheck := flag.Bool("ablate-recheck", false, "ABLASYON: COMMITTED en-iyi-yanıt denetimini kapat (H-2 öncesi uç-durum protokolü)")
 	flag.Parse()
@@ -36,6 +39,20 @@ func main() {
 		os.Exit(1)
 	}
 	SetTimescale(*timescale)
+	SimN = *nStations
+	InterfRadius = *interfRadius
+	if *picoFrac < 0 || *picoFrac > 1 {
+		fmt.Println("HATA: -pico-fraction 0 ile 1 arasında olmalı")
+		os.Exit(1)
+	}
+	PicoFraction = *picoFrac
+	if InterfRadius < SimThreshold {
+		fmt.Printf("UYARI: -interf-radius (%.0f m) oyun eşiğinden (%.0f m) küçük; girişim eksik toplanır.\n", InterfRadius, SimThreshold)
+	}
+	if SimN < 1 {
+		fmt.Println("HATA: -N pozitif olmalı")
+		os.Exit(1)
+	}
 	switch *coupling {
 	case "physical":
 		CouplingMode = CouplingPhysical
@@ -128,6 +145,16 @@ func main() {
 	fmt.Printf("fc=%.1f GHz | hBS=%.0f m | hUT=%.1f m | B=%.0f MHz | NF=%.0f dB | N=%.1f dBm\n",
 		CarrierFreqGHz, BSHeightM, UEHeightM, BandwidthHz/1e6, NoiseFigureDB,
 		10*math.Log10(NoisePowerWatts()*1000))
+	macroCount, picoCount := 0, 0
+	for _, bs := range Network {
+		if bs.IsPico {
+			picoCount++
+		} else {
+			macroCount++
+		}
+	}
+	fmt.Printf("HetNet: %d makro (%.0f W/%.0f m) + %d piko (%.0f W/%.0f m) | girişim yarıçapı %.0f m\n",
+		macroCount, MacroTxWatts, MacroHeightM, picoCount, PicoTxWatts, PicoHeightM, InterfRadius)
 	fmt.Printf("Tavanlar: SINR<=%.0f dB, spektral verim<=%.1f bps/Hz (=%.0f Mbps)\n\n",
 		SINRCapDB, SpectralEffCapBpsHz, BandwidthHz*SpectralEffCapBpsHz/1e6)
 
@@ -207,7 +234,7 @@ func main() {
 	// için buradaki oran PoA'nın kendisi değil, bir ALT SINIRIDIR.
 	fmt.Println("\n--- TRUE OPTIMUM (Branch-and-Bound) ---")
 	optStart := time.Now()
-	opt := BruteForceOptimum(Network, int(MaxColors), 10*time.Second)
+	opt := BruteForceOptimum(Network, int(MaxColors), *optBudget)
 	fmt.Printf("B&B süresi: %.2fs | Kanıtlanmış optimum: %v\n", time.Since(optStart).Seconds(), opt.Exact)
 
 	if !opt.Exact {

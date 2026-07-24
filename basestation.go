@@ -15,6 +15,9 @@ func NewBaseStation(id Agent_ID, x, y float64) *BaseStation {
 		ID:          id,
 		X:           x,
 		Y:           y,
+		IsPico:      false,                   // A3: varsayılan makro; BuildNetwork bazılarını piko yapar
+		TxWatts:     MacroTxWatts,            // 40 W
+		HeightM:     MacroHeightM,            // 25 m
 		Inbox:       make(chan Message, 100), //Bufer kanalı
 		Outbox:      make(map[Agent_ID]chan Message),
 		CurrentPRB:  -1,

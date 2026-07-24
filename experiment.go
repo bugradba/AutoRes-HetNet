@@ -44,7 +44,20 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 		net[i] = NewBaseStation(Agent_ID(i), rng.Float64()*areaSize, rng.Float64()*areaSize)
 	}
 
-	// --- AŞAMA 1: KOMŞULUK GRAFI ---
+	// --- A3: HETEROJEN İSTASYON TİPLERİ ---
+	// İstasyonların PicoFraction oranı piko (düşük güç/yükseklik), gerisi
+	// makro yapılır. Determinizm için indeks sırasında ve tohumlu rng ile
+	// atanır. Bu, projeyi adındaki "HetNet" iddiasıyla tutarlı kılar:
+	// güçlü makro hücreler + zayıf piko hücreler bir arada.
+	if PicoFraction > 0 {
+		for i := 0; i < n; i++ {
+			if rng.Float64() < PicoFraction {
+				net[i].IsPico = true
+				net[i].TxWatts = PicoTxWatts
+				net[i].HeightM = PicoHeightM
+			}
+		}
+	}
 	// Eşik yalnızca "kim kiminle mesaj alışverişi yapıyor" sorusunu
 	// yanıtlar; ağırlıklar 3. aşamada hesaplanır.
 	for i := 0; i < n; i++ {
@@ -84,13 +97,22 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 		bs.ServingLOS = rng.Float64() < LOSProbabilityUMa(math.Max(userDist, 10.0))
 		bs.ServingShadowDB = rng.NormFloat64() * ShadowSigmaDB(bs.ServingLOS)
 
-		// 3) Girişim linkleri: her komşu BS -> BU kullanıcı
-		for _, neighborID := range bs.Neighbros {
-			interferer := net[int(neighborID)]
+		// 3) Girişim linkleri (A2): yalnızca oyun komşuları değil,
+		//    girişim yarıçapı içindeki TÜM istasyonlar bu kullanıcıya
+		//    girişim yapabilir. Determinizm için j sırasıyla yinelenir.
+		for j := 0; j < n; j++ {
+			if j == i {
+				continue
+			}
+			interferer := net[j]
 			d := dist2D(interferer.X, interferer.Y, bs.UserX, bs.UserY)
+			if d > InterfRadius {
+				continue // çok uzak: katkısı ihmal edilebilir
+			}
 			los := rng.Float64() < LOSProbabilityUMa(math.Max(d, 10.0))
-			bs.InterfLOS[neighborID] = los
-			bs.InterfShadowDB[neighborID] = rng.NormFloat64() * ShadowSigmaDB(los)
+			bs.InterfLOS[interferer.ID] = los
+			bs.InterfShadowDB[interferer.ID] = rng.NormFloat64() * ShadowSigmaDB(los)
+			bs.Interferers = append(bs.Interferers, interferer.ID)
 		}
 	}
 
@@ -173,10 +195,13 @@ func assignCouplingWeights(net []*BaseStation, rng *rand.Rand, verbose bool) {
 				dToMyUE := dist2D(other.X, other.Y, bs.UserX, bs.UserY)
 				dToItsUE := dist2D(bs.X, bs.Y, other.UserX, other.UserY)
 
-				gainToMyUE := LinkGain(dToMyUE, bs.InterfLOS[nid], bs.InterfShadowDB[nid])
-				gainToItsUE := LinkGain(dToItsUE, other.InterfLOS[bs.ID], other.InterfShadowDB[bs.ID])
+				// A3: her yön kendi girişimcisinin gücü ve yüksekliğiyle.
+				// w_ij = P_j·G(j→UE_i) + P_i·G(i→UE_j) — hâlâ simetrik
+				// (i↔j takasında terimler yer değiştirir), potential game korunur.
+				gainToMyUE := LinkGain(dToMyUE, bs.InterfLOS[nid], bs.InterfShadowDB[nid], other.HeightM)
+				gainToItsUE := LinkGain(dToItsUE, other.InterfLOS[bs.ID], other.InterfShadowDB[bs.ID], bs.HeightM)
 
-				w = TxPowerWatts * (gainToMyUE + gainToItsUE)
+				w = other.TxWatts*gainToMyUE + bs.TxWatts*gainToItsUE
 				detail = fmt.Sprintf("BS-BS: %.1fm | ->UE_i: %.1fm | ->UE_j: %.1fm",
 					Distance(bs, other), dToMyUE, dToItsUE)
 			}
@@ -850,9 +875,14 @@ func RunMonteCarlo(runs int, baseSeed int64, optBudget time.Duration) {
 	fmt.Printf("\nYakınsayan koşu                 : %d/%d (%.1f%%)\n", convCount, runs, 100*float64(convCount)/float64(runs))
 	fmt.Printf("Gerçek Nash dengesi olan koşu   : %d/%d (0 ihlal + 0 uncommitted)\n", nashOK, runs)
 	fmt.Printf("Girişimi ~0 olan koşu           : %d/%d (%.1f%%)  <-- \"0.0000\" iddiasının dürüst hali\n", zeroInterf, runs, 100*float64(zeroInterf)/float64(runs))
-	fmt.Printf("Optimum kanıtlanan koşu         : %d/%d\n", optProven, runs)
+	fmt.Printf("Optimum kanıtlanan koşu         : %d/%d (%.0f%%) | N=%d\n", optProven, runs, 100*float64(optProven)/float64(runs), SimN)
+	if optProven < runs {
+		fmt.Println("  NOT: PoA yalnızca optimumun KANITLANDIĞI koşulardan hesaplanır; bu")
+		fmt.Println("  koşular sistematik olarak daha KOLAY (seyrek/küçük bileşenli) örneklere")
+		fmt.Println("  yanlı olabilir. Güvenilir PoA için küçük N kullanın (ör. -N 20: %100 kanıt).")
+	}
 	if optZeroNE > 0 {
-		fmt.Printf("OPT=0 iken NE>0 kalan koşu      : %d (PoA bu örneklerde sonsuz)\n", optZeroNE)
+		fmt.Printf("OPT=0 iken NE>0 kalan koşu      : %d (PoA bu örneklerde tanımsız/sonsuz; ort.'a katılmaz)\n", optZeroNE)
 	}
 	fmt.Println("\n* Kanal modeli: 3GPP TR 38.901 UMa (fc=3.5 GHz, hBS=25 m, hUT=1.5 m),")
 	fmt.Println("  mesafeye bağlı LOS olasılığı, gölgeleme LOS 4 dB / NLOS 6 dB, donmuş kanal,")

@@ -28,7 +28,7 @@ func approxDB(t *testing.T, got, want, tol float64, what string) {
 // TestUMaBreakpointDistance: d'BP = 4·h'BS·h'UT·fc/c
 // = 4 · 24 · 0.5 · 3.5e9 / 3e8 = 560 m
 func TestUMaBreakpointDistance(t *testing.T) {
-	approxDB(t, umaBreakpointDistance(), 560.0, 1e-6, "d'BP")
+	approxDB(t, umaBreakpointDistance(MacroHeightM), 560.0, 1e-6, "d'BP")
 }
 
 // TestUMaPathLossLOSAnalytic: d2D = 100 m, LOS, fc = 3.5 GHz.
@@ -36,10 +36,10 @@ func TestUMaBreakpointDistance(t *testing.T) {
 //	d3D = sqrt(100² + 23.5²) = 102.7241 m
 //	PL  = 28 + 22·log10(102.7241) + 20·log10(3.5) = 83.1382 dB
 func TestUMaPathLossLOSAnalytic(t *testing.T) {
-	approxDB(t, PathLossUMa(100, true), 83.1382, 1e-3, "PL_UMa-LOS(100 m)")
+	approxDB(t, PathLossUMa(100, true, MacroHeightM), 83.1382, 1e-3, "PL_UMa-LOS(100 m)")
 
 	// İkinci nokta: d2D = 50 m -> 77.2122 dB
-	approxDB(t, PathLossUMa(50, true), 77.2122, 1e-3, "PL_UMa-LOS(50 m)")
+	approxDB(t, PathLossUMa(50, true, MacroHeightM), 77.2122, 1e-3, "PL_UMa-LOS(50 m)")
 }
 
 // TestUMaPathLossNLOSAnalytic: aynı geometride NLOS.
@@ -47,15 +47,15 @@ func TestUMaPathLossLOSAnalytic(t *testing.T) {
 //	PL' = 13.54 + 39.08·log10(102.7241) + 20·log10(3.5) − 0 = 103.0375 dB
 //	PL  = max(83.1382, 103.0375) = 103.0375 dB
 func TestUMaPathLossNLOSAnalytic(t *testing.T) {
-	approxDB(t, PathLossUMa(100, false), 103.0375, 1e-3, "PL_UMa-NLOS(100 m)")
-	approxDB(t, PathLossUMa(50, false), 92.5108, 1e-3, "PL_UMa-NLOS(50 m)")
+	approxDB(t, PathLossUMa(100, false, MacroHeightM), 103.0375, 1e-3, "PL_UMa-NLOS(100 m)")
+	approxDB(t, PathLossUMa(50, false, MacroHeightM), 92.5108, 1e-3, "PL_UMa-NLOS(50 m)")
 }
 
 // TestNLOSNeverBetterThanLOS: standardın max(...) kuralı — NLOS bir
 // bağlantı hiçbir mesafede LOS'tan daha az kayıplı olamaz.
 func TestNLOSNeverBetterThanLOS(t *testing.T) {
 	for d := 10.0; d <= 1000.0; d += 5 {
-		los, nlos := PathLossUMa(d, true), PathLossUMa(d, false)
+		los, nlos := PathLossUMa(d, true, MacroHeightM), PathLossUMa(d, false, MacroHeightM)
 		if nlos < los-1e-9 {
 			t.Fatalf("d2D=%.0f m: NLOS (%.3f dB) < LOS (%.3f dB) — max() kuralı ihlal edildi", d, nlos, los)
 		}
@@ -67,7 +67,7 @@ func TestPathLossMonotonic(t *testing.T) {
 	for _, los := range []bool{true, false} {
 		prev := -math.MaxFloat64
 		for d := 10.0; d <= 2000.0; d += 10 {
-			pl := PathLossUMa(d, los)
+			pl := PathLossUMa(d, los, MacroHeightM)
 			if pl < prev-1e-9 {
 				t.Fatalf("LOS=%v, d2D=%.0f m: yol kaybı azaldı (%.3f < %.3f)", los, d, pl, prev)
 			}
@@ -79,9 +79,9 @@ func TestPathLossMonotonic(t *testing.T) {
 // TestBreakpointContinuity: kırılma noktasında iki parçalı LOS modeli
 // süreklidir (PL1(d'BP) == PL2(d'BP)).
 func TestBreakpointContinuity(t *testing.T) {
-	dBP := umaBreakpointDistance()
-	before := PathLossUMa(dBP-0.001, true)
-	after := PathLossUMa(dBP+0.001, true)
+	dBP := umaBreakpointDistance(MacroHeightM)
+	before := PathLossUMa(dBP-0.001, true, MacroHeightM)
+	after := PathLossUMa(dBP+0.001, true, MacroHeightM)
 	if math.Abs(before-after) > 1e-3 {
 		t.Fatalf("kırılma noktasında süreksizlik: %.6f vs %.6f dB", before, after)
 	}
@@ -191,6 +191,7 @@ func TestInterfererGeometryUsesUELocation(t *testing.T) {
 	interferer := phyStation(1, 80, 0, 200, 200, true)
 
 	serving.Neighbros = []Agent_ID{1}
+	serving.Interferers = []Agent_ID{1}  // A2: girişim artık Interferers üzerinden
 	serving.NeighborWeights[1] = 12345.0 // oyun grafı ağırlığı: PHY'ye girmemeli
 	serving.InterfLOS[1] = true
 	serving.InterfShadowDB[1] = 0
@@ -201,8 +202,8 @@ func TestInterfererGeometryUsesUELocation(t *testing.T) {
 	got := CapacityForColor(serving, 0, net, colors)
 
 	// Kapalı form: 50 m serving, 30 m girişim, ikisi de LOS, gölgeleme 0
-	sig := TxPowerWatts * math.Pow(10, -PathLossUMa(50, true)/10)
-	interf := TxPowerWatts * math.Pow(10, -PathLossUMa(30, true)/10)
+	sig := TxPowerWatts * math.Pow(10, -PathLossUMa(50, true, MacroHeightM)/10)
+	interf := TxPowerWatts * math.Pow(10, -PathLossUMa(30, true, MacroHeightM)/10)
 	sinr := math.Min(sig/(interf+NoisePowerWatts()), math.Pow(10, SINRCapDB/10))
 	want := BandwidthHz * math.Min(math.Log2(1+sinr), SpectralEffCapBpsHz) / 1e6
 

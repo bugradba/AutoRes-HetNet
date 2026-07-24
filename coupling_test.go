@@ -80,8 +80,8 @@ func TestPhysicalCouplingMatchesInterference(t *testing.T) {
 		net := []*BaseStation{a, b}
 		assignCouplingWeights(net, rand.New(rand.NewSource(1)), false)
 
-		gBtoUEA := math.Pow(10, -PathLossUMa(30, true)/10)
-		gAtoUEB := math.Pow(10, -PathLossUMa(140, true)/10)
+		gBtoUEA := math.Pow(10, -PathLossUMa(30, true, MacroHeightM)/10)
+		gAtoUEB := math.Pow(10, -PathLossUMa(140, true, MacroHeightM)/10)
 		want := TxPowerWatts * (gBtoUEA + gAtoUEB)
 
 		if got := a.NeighborWeights[1]; math.Abs(got-want)/want > 1e-12 {
@@ -284,27 +284,80 @@ func TestCouplingModesShareTopologyAndChannel(t *testing.T) {
 	}
 }
 
-// TestPotentialEqualsTotalInterference: A1'in en güçlü iddiası —
-// oyunun potansiyel fonksiyonu (AssignmentCost) TAM OLARAK ağın
-// toplam eş-kanal girişim gücüne eşittir. Yani ajanların minimize
-// ettiği soyut nicelik ile PHY katmanının ölçtüğü fiziksel nicelik
-// aynı şeydir.
-func TestPotentialEqualsTotalInterference(t *testing.T) {
+// TestPotentialEqualsNeighborInterference: A1'in iddiası — oyunun
+// potansiyel fonksiyonu (AssignmentCost), KOMŞULUK grafı üzerindeki
+// eş-kanal girişim gücüne eşittir. Yani ajanların minimize ettiği soyut
+// nicelik, oyun grafındaki fiziksel girişimdir.
+//
+// A2 NOTU: Bu, TOPLAM fiziksel girişime eşit DEĞİLDİR — A2 ile girişim
+// komşuluk grafının ötesindeki eş-kanal istasyonları da içerir. Oyun
+// yalnızca komşuluk-içi girişimi optimize eder; komşuluk-dışı girişim
+// fiziksel gerçeğin parçasıdır ama oyunun potansiyeline girmez. Bu
+// ayrım bilinçlidir: oyun grafı yerel ve simetrik tutulur (potential
+// game koşulu), fizik katmanı ise eksiksizdir.
+func TestPotentialEqualsNeighborInterference(t *testing.T) {
 	withCoupling(CouplingPhysical, func() {
 		rng := rand.New(rand.NewSource(31337))
 		net := BuildNetwork(rng, 30, SimAreaSize, SimThreshold, false)
 		colors := RandomAssignment(net, rng)
-		byID := indexByID(net)
 
-		// Doğrudan ölçüm: her kullanıcının konumunda toplanan girişim.
-		measured := 0.0
+		// Yalnızca KOMŞU (oyun grafı) eş-kanal çiftleri üzerinden girişim.
+		// A3: her yön kendi girişimcisinin gücüyle ölçülür (w_ij tanımıyla tutarlı).
+		neighborInterf := 0.0
 		for _, bs := range net {
-			measured += interferencePowerAt(bs, colors[bs.ID], byID, colors)
+			myColor := colors[bs.ID]
+			if myColor == -1 {
+				continue
+			}
+			for _, nid := range bs.Neighbros {
+				if colors[nid] != myColor {
+					continue
+				}
+				n := net[int(nid)]
+				d := dist2D(n.X, n.Y, bs.UserX, bs.UserY)
+				neighborInterf += n.TxWatts * LinkGain(d, bs.InterfLOS[nid], bs.InterfShadowDB[nid], n.HeightM)
+			}
 		}
 
 		potential := AssignmentCost(net, colors)
-		if math.Abs(measured-potential) > measured*1e-9 {
-			t.Fatalf("potansiyel != toplam girişim: %.9e vs %.9e", potential, measured)
+		if math.Abs(neighborInterf-potential) > potential*1e-9 {
+			t.Fatalf("potansiyel != komşuluk-içi girişim: %.9e vs %.9e", potential, neighborInterf)
 		}
 	})
+}
+
+// TestInterferenceExceedsNeighborhood: A2'nin doğrudan testi. Toplam
+// fiziksel girişim, yalnızca komşuluk-içi girişimden BÜYÜK olmalı —
+// çünkü komşuluk eşiğinin (100 m) dışındaki eş-kanal istasyonlar da
+// katkı yapar. Eşit çıksaydı A2 çalışmıyor demekti.
+func TestInterferenceExceedsNeighborhood(t *testing.T) {
+	rng := rand.New(rand.NewSource(31337))
+	net := BuildNetwork(rng, 40, SimAreaSize, SimThreshold, false)
+	colors := RandomAssignment(net, rng)
+	byID := indexByID(net)
+
+	totalPhysical := 0.0
+	for _, bs := range net {
+		totalPhysical += interferencePowerAt(bs, colors[bs.ID], byID, colors)
+	}
+
+	neighborOnly := 0.0
+	for _, bs := range net {
+		myColor := colors[bs.ID]
+		if myColor == -1 {
+			continue
+		}
+		for _, nid := range bs.Neighbros {
+			if colors[nid] == myColor {
+				n := byID[nid]
+				d := dist2D(n.X, n.Y, bs.UserX, bs.UserY)
+				neighborOnly += TxPowerWatts * LinkGain(d, bs.InterfLOS[nid], bs.InterfShadowDB[nid], MacroHeightM)
+			}
+		}
+	}
+
+	if !(totalPhysical > neighborOnly) {
+		t.Fatalf("A2 çalışmıyor: toplam girişim (%.3e) komşuluk-içiyle (%.3e) aynı",
+			totalPhysical, neighborOnly)
+	}
 }

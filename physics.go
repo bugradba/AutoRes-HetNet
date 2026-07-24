@@ -36,28 +36,28 @@ import "math"
 
 // umaBreakpointDistance: TR 38.901'deki d'BP kırılma noktası.
 // d'BP = 4 · h'BS · h'UT · fc / c, etkin yükseklikler h' = h - hE,
-// UMa için hE = 1.0 m alınır.
-func umaBreakpointDistance() float64 {
+// UMa için hE = 1.0 m alınır. A3: txHeightM parametre (makro/piko).
+func umaBreakpointDistance(txHeightM float64) float64 {
 	const hE = 1.0
 	const c = 3.0e8
-	hBS := BSHeightM - hE
+	hBS := txHeightM - hE
 	hUT := UEHeightM - hE
 	return 4 * hBS * hUT * (CarrierFreqGHz * 1e9) / c
 }
 
 // PathLossUMaLOS: UMa LOS yol kaybı (dB). d2D yatay, d3D 3 boyutlu
-// mesafe (m), fc GHz cinsindendir.
+// mesafe (m), fc GHz cinsindendir. A3: txHeightM verici yüksekliği.
 //
 //	d2D <= d'BP : PL1 = 28.0 + 22·log10(d3D) + 20·log10(fc)
 //	d2D >  d'BP : PL2 = 28.0 + 40·log10(d3D) + 20·log10(fc)
 //	                    − 9·log10(d'BP² + (hBS − hUT)²)
-func PathLossUMaLOS(d2D, d3D float64) float64 {
+func PathLossUMaLOS(d2D, d3D, txHeightM float64) float64 {
 	logFc := 20 * math.Log10(CarrierFreqGHz)
-	dBP := umaBreakpointDistance()
+	dBP := umaBreakpointDistance(txHeightM)
 	if d2D <= dBP {
 		return 28.0 + 22*math.Log10(d3D) + logFc
 	}
-	dh := BSHeightM - UEHeightM
+	dh := txHeightM - UEHeightM
 	return 28.0 + 40*math.Log10(d3D) + logFc - 9*math.Log10(dBP*dBP+dh*dh)
 }
 
@@ -68,9 +68,9 @@ func PathLossUMaLOS(d2D, d3D float64) float64 {
 //
 // max(...) standardın parçasıdır: NLOS bir bağlantı, aynı geometrideki
 // LOS bağlantıdan daha az kayıplı olamaz.
-func PathLossUMaNLOS(d2D, d3D float64) float64 {
+func PathLossUMaNLOS(d2D, d3D, txHeightM float64) float64 {
 	plNLOS := 13.54 + 39.08*math.Log10(d3D) + 20*math.Log10(CarrierFreqGHz) - 0.6*(UEHeightM-1.5)
-	return math.Max(PathLossUMaLOS(d2D, d3D), plNLOS)
+	return math.Max(PathLossUMaLOS(d2D, d3D, txHeightM), plNLOS)
 }
 
 // LOSProbabilityUMa: TR 38.901 Tablo 7.4.2-1, UMa.
@@ -93,22 +93,22 @@ func LOSProbabilityUMa(d2D float64) float64 {
 	return base * corr
 }
 
-// PathLossUMa: yatay mesafe ve LOS durumundan yol kaybı (dB).
-// d2D, modelin geçerlilik alt sınırı olan 10 m'ye kırpılır.
-func PathLossUMa(d2D float64, los bool) float64 {
+// PathLossUMa: yatay mesafe, LOS durumu ve verici yüksekliğinden yol
+// kaybı (dB). A3: yükseklik artık parametre (makro 25 m, piko 10 m).
+func PathLossUMa(d2D float64, los bool, txHeightM float64) float64 {
 	d2D = math.Max(d2D, 10.0)
-	dh := BSHeightM - UEHeightM
+	dh := txHeightM - UEHeightM
 	d3D := math.Sqrt(d2D*d2D + dh*dh)
 	if los {
-		return PathLossUMaLOS(d2D, d3D)
+		return PathLossUMaLOS(d2D, d3D, txHeightM)
 	}
-	return PathLossUMaNLOS(d2D, d3D)
+	return PathLossUMaNLOS(d2D, d3D, txHeightM)
 }
 
 // LinkGain: yol kaybı + gölgelemeden doğrusal kanal kazancı.
-// shadowDB pozitifse ekstra kayıp, negatifse ekstra kazanç demektir.
-func LinkGain(d2D float64, los bool, shadowDB float64) float64 {
-	return math.Pow(10, -(PathLossUMa(d2D, los)+shadowDB)/10.0)
+// A3: verici yüksekliği parametre.
+func LinkGain(d2D float64, los bool, shadowDB, txHeightM float64) float64 {
+	return math.Pow(10, -(PathLossUMa(d2D, los, txHeightM)+shadowDB)/10.0)
 }
 
 // NoisePowerWatts: termal gürültü + alıcı gürültü şekli.
@@ -138,20 +138,28 @@ func dist2D(x1, y1, x2, y2 float64) float64 {
 // KULLANICISININ konumunda ölçülen toplam girişim gücü (Watt).
 // Yalnızca gerçekten ileten (renk atanmış) eş-kanal komşular sayılır;
 // her katkı girişimci-BS -> kullanıcı geometrisiyle hesaplanır.
+// interferencePowerAt: verilen renk haritasına göre, bs'nin
+// KULLANICISININ konumunda ölçülen toplam girişim gücü (Watt).
+//
+// A2 DÜZELTMESİ: Girişim, oyunun komşuluk grafıyla (Neighbros) DEĞİL,
+// bu kullanıcıya girişim yapabilecek TÜM eş-kanal istasyonlar
+// (Interferers, girişim yarıçapı içinde) üzerinden toplanır. Eş-kanal
+// bir istasyon 100 m oyun eşiğinin dışında olsa bile fiziksel girişim
+// yapar; eski kod bunları sıfır sayıyordu.
 func interferencePowerAt(bs *BaseStation, myColor PRB, byID map[Agent_ID]*BaseStation, colorOf map[Agent_ID]PRB) float64 {
 	interference := 0.0
-	for _, neighborID := range bs.Neighbros {
-		nc, ok := colorOf[neighborID]
+	for _, interfererID := range bs.Interferers {
+		nc, ok := colorOf[interfererID]
 		if !ok || nc == -1 || nc != myColor {
-			continue // iletmeyen ya da farklı kanaldaki komşu girişim yapmaz
+			continue // iletmeyen ya da farklı kanaldaki istasyon girişim yapmaz
 		}
-		interferer, ok := byID[neighborID]
+		interferer, ok := byID[interfererID]
 		if !ok {
 			continue
 		}
 		d := dist2D(interferer.X, interferer.Y, bs.UserX, bs.UserY)
-		gain := LinkGain(d, bs.InterfLOS[neighborID], bs.InterfShadowDB[neighborID])
-		interference += TxPowerWatts * gain
+		gain := LinkGain(d, bs.InterfLOS[interfererID], bs.InterfShadowDB[interfererID], interferer.HeightM)
+		interference += interferer.TxWatts * gain // A3: girişimcinin kendi gücü
 	}
 	return interference
 }
@@ -163,7 +171,7 @@ func SINRForColor(bs *BaseStation, color PRB, byID map[Agent_ID]*BaseStation, co
 		return 0.0
 	}
 	dServ := dist2D(bs.X, bs.Y, bs.UserX, bs.UserY)
-	signal := TxPowerWatts * LinkGain(dServ, bs.ServingLOS, bs.ServingShadowDB)
+	signal := bs.TxWatts * LinkGain(dServ, bs.ServingLOS, bs.ServingShadowDB, bs.HeightM) // A3: kendi gücü/yüksekliği
 
 	interference := interferencePowerAt(bs, color, byID, colorOf)
 
