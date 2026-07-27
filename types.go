@@ -127,8 +127,14 @@ var (
 	StartDelayMax = 1 * time.Second        // rastgele başlangıç gecikmesi üst sınırı
 	QuietWindow   = 3 * time.Second        // H-2: sessizlik penceresi (yakınsama tanımı)
 	PollInterval  = 50 * time.Millisecond  // deney katmanı yoklama aralığı
-	MaxWait       = 20 * time.Second       // livelock'a karşı güvenlik üst sınırı
+	MaxWait       = 200 * time.Second      // livelock güvenlik tavanı (SetTimescale'de tur-sabit türetilir)
 )
+
+// MaxWaitRounds: livelock güvenlik tavanı, "protokol turu" cinsinden.
+// MaxWait bundan türetilir (= MaxWaitRounds × ThinkPeriod), böylece
+// -timescale ne olursa olsun güvenlik payı SABİT sayıda tur kalır.
+// Tipik yakınsama ~15-25 tur olduğundan 400 tur bolca pay bırakır.
+const MaxWaitRounds = 400
 
 // SetTimescale: tüm protokol zamanlayıcılarını s çarpanıyla ölçekler.
 // main() içinde, herhangi bir simülasyondan ÖNCE bir kez çağrılmalıdır.
@@ -142,7 +148,11 @@ func SetTimescale(s float64) {
 	StartDelayMax = scale(1 * time.Second)
 	QuietWindow = scale(3 * time.Second)
 	PollInterval = scale(50 * time.Millisecond)
-	MaxWait = scale(20 * time.Second)
+	// MaxWait tur-sabit: ThinkPeriod ölçeklendikten SONRA ondan türetilir,
+	// böylece güvenlik payı her zaman MaxWaitRounds tur kalır (timescale'den
+	// bağımsız). Bu, hızlandırılmış deneylerde yavaş ama geçerli koşuların
+	// haksızca "yakınsamadı" sayılmasını önler.
+	MaxWait = MaxWaitRounds * ThinkPeriod
 }
 
 // --- SİMÜLASYON PARAMETRELERİ ---

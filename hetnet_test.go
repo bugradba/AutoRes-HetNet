@@ -141,3 +141,28 @@ func TestCouplingSymmetricWithHetNet(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxWaitIsTimescaleInvariant: MaxWait güvenlik tavanı "protokol
+// turu" cinsinden SABİT olmalı — timescale değişince tur sayısı
+// değişmemeli. Aksi halde hızlandırılmış deneyler yavaş ama geçerli
+// koşuları haksızca "yakınsamadı" sayar (30/200 çöküşünün kök nedeni).
+func TestMaxWaitIsTimescaleInvariant(t *testing.T) {
+	rounds := func() float64 {
+		return float64(MaxWait) / float64(ThinkPeriod)
+	}
+	SetTimescale(1.0)
+	full := rounds()
+	SetTimescale(0.1)
+	fast := rounds()
+	SetTimescale(0.05)
+	faster := rounds()
+	SetTimescale(1.0) // eski haline döndür
+
+	if math.Abs(full-fast) > 1e-6 || math.Abs(full-faster) > 1e-6 {
+		t.Fatalf("MaxWait tur cinsinden sabit değil: ts1=%.1f, ts0.1=%.1f, ts0.05=%.1f tur",
+			full, fast, faster)
+	}
+	if math.Abs(full-float64(MaxWaitRounds)) > 1e-6 {
+		t.Fatalf("MaxWait %.0f tur olmalıydı, %.1f", float64(MaxWaitRounds), full)
+	}
+}

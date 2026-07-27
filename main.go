@@ -190,7 +190,7 @@ func main() {
 		sinrSum/float64(numDevice), cappedCount, numDevice)
 
 	fairnessScore := CalculateJainsFairness(Network)
-	globalObjective := CalculateGlobalObjective(Network)
+	  globalObjective := CalculateGlobalObjective(Network)
 
 	fmt.Printf("\n>>> SYSTEM PERFORMANCE RESULTS V1 <<<\n")
 	fmt.Printf("1. Total Network Capacity : %.2f Mbps (Higher is better)\n", totalNetworkCapacity)
