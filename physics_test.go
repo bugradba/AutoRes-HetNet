@@ -190,7 +190,7 @@ func TestInterfererGeometryUsesUELocation(t *testing.T) {
 	serving := phyStation(0, 0, 0, 50, 0, true)
 	interferer := phyStation(1, 80, 0, 200, 200, true)
 
-	serving.Neighbros = []Agent_ID{1}
+	serving.Neighbors = []Agent_ID{1}
 	serving.Interferers = []Agent_ID{1}  // A2: girişim artık Interferers üzerinden
 	serving.NeighborWeights[1] = 12345.0 // oyun grafı ağırlığı: PHY'ye girmemeli
 	serving.InterfLOS[1] = true
@@ -332,8 +332,8 @@ func TestDSATURProperColoringWhenPossible(t *testing.T) {
 	link := func(x, y *BaseStation) {
 		x.NeighborWeights[y.ID] = 1e-9
 		y.NeighborWeights[x.ID] = 1e-9
-		x.Neighbros = append(x.Neighbros, y.ID)
-		y.Neighbros = append(y.Neighbros, x.ID)
+		x.Neighbors = append(x.Neighbors, y.ID)
+		y.Neighbors = append(y.Neighbors, x.ID)
 	}
 	link(a, b)
 	link(b, c)

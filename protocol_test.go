@@ -26,8 +26,8 @@ func twoLinkedStations(w float64) (*BaseStation, *BaseStation) {
 	b := NewBaseStation(1, 50, 0)
 	a.NeighborWeights[b.ID] = w
 	b.NeighborWeights[a.ID] = w
-	a.Neighbros = []Agent_ID{b.ID}
-	b.Neighbros = []Agent_ID{a.ID}
+	a.Neighbors = []Agent_ID{b.ID}
+	b.Neighbors = []Agent_ID{a.ID}
 	a.Outbox[b.ID] = b.Inbox
 	b.Outbox[a.ID] = a.Inbox
 	return a, b

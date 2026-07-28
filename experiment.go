@@ -63,8 +63,8 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
 			if Distance(net[i], net[j]) < threshold {
-				net[i].Neighbros = append(net[i].Neighbros, net[j].ID)
-				net[j].Neighbros = append(net[j].Neighbros, net[i].ID)
+				net[i].Neighbors = append(net[i].Neighbors, net[j].ID)
+				net[j].Neighbors = append(net[j].Neighbors, net[i].ID)
 
 				net[i].Outbox[net[j].ID] = net[j].Inbox
 				net[j].Outbox[net[i].ID] = net[i].Inbox
@@ -81,7 +81,7 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 	//   - Tüm tahsis şemaları aynı gerçekleşme üzerinde karşılaştırılır.
 	// Her bağlantının LOS durumu 38.901'in mesafeye bağlı LOS
 	// olasılığıyla, gölgelemesi ise o duruma ait sigma ile (LOS 4 dB,
-	// NLOS 6 dB) üretilir. Determinizm için Neighbros DİLİMİ üzerinde
+	// NLOS 6 dB) üretilir. Determinizm için Neighbors DİLİMİ üzerinde
 	// yinelenir (harita yineleme sırası rastgele olurdu).
 	// ============================================================
 	for i := 0; i < n; i++ {
@@ -167,7 +167,7 @@ func assignCouplingWeights(net []*BaseStation, rng *rand.Rand, verbose bool) {
 
 	for i := 0; i < len(net); i++ {
 		bs := net[i]
-		for _, nid := range bs.Neighbros {
+		for _, nid := range bs.Neighbors {
 			if nid < bs.ID {
 				continue // her kenarı bir kez işle (i < j)
 			}

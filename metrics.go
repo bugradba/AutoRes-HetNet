@@ -34,30 +34,16 @@ func CalculateJainsFairness(network []*BaseStation) float64 {
 // Tüm ağdaki toplam çatışma maliyetini hesaplar.
 // Hedef: Bu değerin simülasyon sonunda azalmış olmasıdır.
 
+// CalculateGlobalObjective: ağın toplam eş-kanal çakışma maliyeti
+// (oyunun sosyal maliyeti / potansiyel fonksiyonu).
+//
+// C2 DÜZELTMESİ: Eskiden her komşunun rengini bulmak için tüm ağı
+// doğrusal tarıyordu (O(N²·derece)). Artık ColorsOfNetwork ile renk
+// haritasını bir kez kurup AssignmentCost'a devrediyor (O(N·derece)).
+// AssignmentCost tüm şemaların paylaştığı tek maliyet tanımı olduğundan
+// bu aynı zamanda kod tekrarını da giderir.
 func CalculateGlobalObjective(network []*BaseStation) float64 {
-	totalCost := 0.0
-
-	for _, bs := range network {
-		if bs.CurrentPRB == -1 {
-			continue
-		}
-
-		for neighborID, weight := range bs.NeighborWeights {
-			var neighborColor PRB = -1
-			for _, node := range network {
-				if node.ID == neighborID {
-					neighborColor = node.CurrentPRB
-					break
-				}
-			}
-
-			if neighborColor != -1 && bs.CurrentPRB == neighborColor {
-				totalCost += weight
-			}
-		}
-	}
-
-	return totalCost / 2.0
+	return AssignmentCost(network, ColorsOfNetwork(network))
 }
 
 // ============================================================

@@ -89,7 +89,7 @@ func (bs *BaseStation) Think() {
 
 		bs.ProposedPRB = bestPick
 		if Verbose {
-			fmt.Printf("[BS-%d] Utility Maximize Edildi -> Selected Colour: %d\n", bs.ID, bestPick)
+			fmt.Printf("[BS-%d] best response computed -> selected color: %d\n", bs.ID, bestPick)
 		}
 
 		bs.Broadcast(MSG_PROPOSE, "Utility based proposal", bestPick)
@@ -221,20 +221,20 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 			// erken return komşu haritasını eksik bırakıyor, sonraki
 			// en-iyi-yanıt hesapları eski bilgiyle yapılıyordu.
 			bs.NeighborMap[msg.Sender_ID] = msg.Value
-			bs.Send(msg.Sender_ID, MSG_CONFLICT, "That colourful!", bs.CurrentPRB)
+			bs.Send(msg.Sender_ID, MSG_CONFLICT, "color in use", bs.CurrentPRB)
 			return
 		}
 		if bs.State == STATE_WAITING && bs.ProposedPRB == msg.Value {
 			if !AblateIDPriority && bs.ID > msg.Sender_ID {
 				if Verbose {
-					fmt.Printf("⚔ [BS-%d] Conflict! BS-%d'is rejecting (ID Priority).\n", bs.ID, msg.Sender_ID)
+					fmt.Printf("[BS-%d] conflict: rejecting BS-%d (ID priority)\n", bs.ID, msg.Sender_ID)
 				}
 				// H-1 DÜZELTMESİ: Eskiden buraya bs.CurrentPRB yazılıyordu.
 				// WAITING durumundaki istasyonun CurrentPRB'si henüz -1 olduğu
 				// için alıcıdaki "ProposedPRB == msg.Value" karşılaştırması hiç
 				// tutmuyor ve itiraz sessizce yok sayılıyordu (ölü kod).
 				// Doğrusu: itiraz edilen rengin KENDİSİNİ (msg.Value) göndermek.
-				bs.Send(msg.Sender_ID, MSG_CONFLICT, "Wait your turn", msg.Value)
+				bs.Send(msg.Sender_ID, MSG_CONFLICT, "lower ID priority", msg.Value)
 			}
 		}
 		bs.NeighborMap[msg.Sender_ID] = msg.Value
@@ -265,13 +265,13 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 			}
 			if bs.InterferenceFor(contested) < bestAltCost*(1-1e-9) {
 				if Verbose {
-					fmt.Printf(" [BS-%d] Objection noted but color %d is still my best response; staying.\n", bs.ID, contested)
+					fmt.Printf("[BS-%d] objection noted, but color %d is still best response; staying\n", bs.ID, contested)
 				}
 				return
 			}
 
 			if Verbose {
-				fmt.Printf(" [BS-%d] Objection upheld! Withdrawn....\n", bs.ID)
+				fmt.Printf("[BS-%d] objection upheld; withdrawing\n", bs.ID)
 			}
 			// Y-3 DÜZELTMESİ: Eskiden burada mutex TUTULURKEN time.Sleep
 			// yapılıyordu; ajan backoff boyunca hiçbir mesaj işleyemiyor,
@@ -287,7 +287,7 @@ func (bs *BaseStation) HandleMessage(msg Message) {
 }
 
 func (bs *BaseStation) Broadcast(msgType MessageType, payload string, val PRB) {
-	for _, neighborID := range bs.Neighbros {
+	for _, neighborID := range bs.Neighbors {
 		bs.Send(neighborID, msgType, payload, val)
 	}
 }

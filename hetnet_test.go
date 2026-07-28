@@ -166,3 +166,44 @@ func TestMaxWaitIsTimescaleInvariant(t *testing.T) {
 		t.Fatalf("MaxWait %.0f tur olmalıydı, %.1f", float64(MaxWaitRounds), full)
 	}
 }
+
+// TestGlobalObjectiveEqualsAssignmentCost: C2 regresyon testi.
+// CalculateGlobalObjective artık AssignmentCost'a devrediyor; ikisi
+// aynı sonucu vermeli (aynı maliyet tanımı). Bağımsız bir yavaş-ama-
+// doğru O(N²) referans ile de karşılaştırılır.
+func TestGlobalObjectiveEqualsAssignmentCost(t *testing.T) {
+	rng := rand.New(rand.NewSource(2024))
+	net := BuildNetwork(rng, 40, SimAreaSize, SimThreshold, false)
+	// rastgele renkler ata (dengede olmayan durum da test edilsin)
+	colors := RandomAssignment(net, rng)
+	for _, bs := range net {
+		bs.CurrentPRB = colors[bs.ID]
+	}
+
+	fast := CalculateGlobalObjective(net)
+
+	// Bağımsız O(N²) referans (eski algoritmanın mantığı)
+	ref := 0.0
+	for _, bs := range net {
+		if bs.CurrentPRB == -1 {
+			continue
+		}
+		for nid, w := range bs.NeighborWeights {
+			var nc PRB = -1
+			for _, node := range net {
+				if node.ID == nid {
+					nc = node.CurrentPRB
+					break
+				}
+			}
+			if nc != -1 && bs.CurrentPRB == nc {
+				ref += w
+			}
+		}
+	}
+	ref /= 2.0
+
+	if math.Abs(fast-ref) > math.Abs(ref)*1e-9 {
+		t.Fatalf("objective uyuşmazlığı: hızlı=%.9e, referans=%.9e", fast, ref)
+	}
+}

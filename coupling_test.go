@@ -72,8 +72,8 @@ func TestPhysicalCouplingMatchesInterference(t *testing.T) {
 		b := NewBaseStation(1, 80, 0)
 		a.UserX, a.UserY = 50, 0
 		b.UserX, b.UserY = 140, 0
-		a.Neighbros = []Agent_ID{1}
-		b.Neighbros = []Agent_ID{0}
+		a.Neighbors = []Agent_ID{1}
+		b.Neighbors = []Agent_ID{0}
 		a.InterfLOS[1], a.InterfShadowDB[1] = true, 0
 		b.InterfLOS[0], b.InterfShadowDB[0] = true, 0
 
@@ -109,8 +109,8 @@ func TestPhysicalCouplingSeesNearbyInterferer(t *testing.T) {
 			b := NewBaseStation(1, 100, 0)
 			a.UserX, a.UserY = 98, 0
 			b.UserX, b.UserY = 160, 0 // B'nin kullanıcısı A'dan uzakta
-			a.Neighbros = []Agent_ID{1}
-			b.Neighbros = []Agent_ID{0}
+			a.Neighbors = []Agent_ID{1}
+			b.Neighbors = []Agent_ID{0}
 			a.InterfLOS[1], a.InterfShadowDB[1] = true, 0
 			b.InterfLOS[0], b.InterfShadowDB[0] = true, 0
 
@@ -130,8 +130,8 @@ func TestPhysicalCouplingSeesNearbyInterferer(t *testing.T) {
 		b := NewBaseStation(1, 100, 0)
 		a.UserX, a.UserY = 0, -60 // kendi BS'ine yakın, B'den uzak
 		b.UserX, b.UserY = 160, 0
-		a.Neighbros = []Agent_ID{1}
-		b.Neighbros = []Agent_ID{0}
+		a.Neighbors = []Agent_ID{1}
+		b.Neighbors = []Agent_ID{0}
 		a.InterfLOS[1], a.InterfShadowDB[1] = true, 0
 		b.InterfLOS[0], b.InterfShadowDB[0] = true, 0
 		net := []*BaseStation{a, b}
@@ -149,8 +149,8 @@ func TestPhysicalCouplingSeesNearbyInterferer(t *testing.T) {
 	withCoupling(CouplingGeometric, func() {
 		a := NewBaseStation(0, 0, 0)
 		b := NewBaseStation(1, 100, 0)
-		a.Neighbros = []Agent_ID{1}
-		b.Neighbros = []Agent_ID{0}
+		a.Neighbors = []Agent_ID{1}
+		b.Neighbors = []Agent_ID{0}
 		net := []*BaseStation{a, b}
 		assignCouplingWeights(net, rand.New(rand.NewSource(1)), false)
 		geoW := a.NeighborWeights[1]
@@ -173,7 +173,7 @@ func TestCouplingReproducible(t *testing.T) {
 				net := BuildNetwork(rng, 30, SimAreaSize, SimThreshold, false)
 				out := make([]float64, 0, 256)
 				for _, bs := range net {
-					for _, nid := range bs.Neighbros {
+					for _, nid := range bs.Neighbors {
 						out = append(out, bs.NeighborWeights[nid])
 					}
 				}
@@ -255,7 +255,7 @@ func TestCouplingModesShareTopologyAndChannel(t *testing.T) {
 				} else {
 					chn = append(chn, 0)
 				}
-				deg = append(deg, len(bs.Neighbros))
+				deg = append(deg, len(bs.Neighbors))
 			}
 		})
 		return
@@ -309,7 +309,7 @@ func TestPotentialEqualsNeighborInterference(t *testing.T) {
 			if myColor == -1 {
 				continue
 			}
-			for _, nid := range bs.Neighbros {
+			for _, nid := range bs.Neighbors {
 				if colors[nid] != myColor {
 					continue
 				}
@@ -347,7 +347,7 @@ func TestInterferenceExceedsNeighborhood(t *testing.T) {
 		if myColor == -1 {
 			continue
 		}
-		for _, nid := range bs.Neighbros {
+		for _, nid := range bs.Neighbors {
 			if colors[nid] == myColor {
 				n := byID[nid]
 				d := dist2D(n.X, n.Y, bs.UserX, bs.UserY)

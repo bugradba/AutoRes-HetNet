@@ -223,7 +223,7 @@ type BaseStation struct {
 	NeighborWeights map[Agent_ID]float64 // Ağırlıklı Girişim Grafiği
 	Inbox           chan Message
 	Outbox          map[Agent_ID]chan Message
-	Neighbros       []Agent_ID
+	Neighbors       []Agent_ID
 	Quit            chan struct{}    // Stop() ile kapatılır; Start döngüsünü sonlandırır
 	State           AgentState       //Şu an Ne yapıyor
 	CurrentPRB      PRB              //Kazandığı Renk
@@ -240,7 +240,7 @@ type BaseStation struct {
 	// A2 DÜZELTMESİ: Girişim artık komşuluk grafıyla (SimThreshold)
 	// SINIRLI DEĞİL. Eş-kanal bir istasyon, oyunun 100 m eşiğinin
 	// dışında olsa bile bu kullanıcıya fiziksel girişim yapar. Bu yüzden
-	// LOS/gölgeleme, yalnızca Neighbros için değil, girişim yarıçapı
+	// LOS/gölgeleme, yalnızca Neighbors için değil, girişim yarıçapı
 	// (InterfRadius) içindeki TÜM istasyonlar için dondurulur.
 	// (Girişim gücü mesafenin ~3. kuvvetiyle düştüğü için pratikte çok
 	// uzak istasyonların katkısı ihmal edilebilir; InterfRadius bu yüzden

@@ -135,7 +135,7 @@ func main() {
 		if bs.State == STATE_COMMITTED {
 			status = fmt.Sprintf(" PRB-%d", bs.CurrentPRB)
 		}
-		fmt.Printf("BS-%d: %s (Neighbors: %d)\n", bs.ID, status, len(bs.Neighbros))
+		fmt.Printf("BS-%d: %s (Neighbors: %d)\n", bs.ID, status, len(bs.Neighbors))
 
 	}
 
@@ -312,7 +312,7 @@ func main() {
 			Color: int(bs.CurrentPRB),
 		})
 
-		for _, neighborID := range bs.Neighbros {
+		for _, neighborID := range bs.Neighbors {
 			if bs.ID < neighborID { // Her kenarı bir kez eklemek için
 				data.Edges = append(data.Edges, struct {
 					Source int `json:"source"`

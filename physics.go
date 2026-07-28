@@ -141,7 +141,7 @@ func dist2D(x1, y1, x2, y2 float64) float64 {
 // interferencePowerAt: verilen renk haritasına göre, bs'nin
 // KULLANICISININ konumunda ölçülen toplam girişim gücü (Watt).
 //
-// A2 DÜZELTMESİ: Girişim, oyunun komşuluk grafıyla (Neighbros) DEĞİL,
+// A2 DÜZELTMESİ: Girişim, oyunun komşuluk grafıyla (Neighbors) DEĞİL,
 // bu kullanıcıya girişim yapabilecek TÜM eş-kanal istasyonlar
 // (Interferers, girişim yarıçapı içinde) üzerinden toplanır. Eş-kanal
 // bir istasyon 100 m oyun eşiğinin dışında olsa bile fiziksel girişim
