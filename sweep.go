@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ============================================================
@@ -43,7 +45,7 @@ func ParseIntList(s string) ([]int, error) {
 // RunSweep: her (K, N) hücresi için 'runsPerCell' koşu yapar.
 // Koşu r'nin tohumu = baseSeed + r: aynı N için topoloji K'den
 // bağımsızdır, yani K etkisi kanal/yerleşim şansından izole edilir.
-func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) error {
+func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string, optBudget time.Duration) error {
 	f, err := os.Create(csvPath)
 	if err != nil {
 		return fmt.Errorf("CSV açılamadı: %w", err)
@@ -56,6 +58,7 @@ func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) err
 		"k", "n", "run", "seed", "converged", "conv_rounds", "conv_seconds",
 		"committed_frac", "interference_w", "ne_violations",
 		"msgs_per_station", "drops_total", "conflicts_total", "zero_interference",
+		"mean_mbps", "cell_edge_mbps", "dsatur_mean_mbps", "poa",
 	}
 	if err := w.Write(header); err != nil {
 		return err
@@ -80,6 +83,7 @@ func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) err
 				msgAvg    []float64
 				dropSum   int64
 				confSum   int64
+				poaProven int // optimum kanıtlanan koşu sayısı
 			)
 
 			for r := 0; r < runsPerCell; r++ {
@@ -93,6 +97,27 @@ func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) err
 				mst := CollectMessageStats(net)
 				commFrac := float64(CommittedCount(net)) / float64(n)
 				convRound := convSec / ThinkPeriod.Seconds()
+
+				// Fiziksel metrikler (bildiri figürleri): aynı donmuş kanal
+				// üzerinde dağıtık çözüm ve DSATUR karşılaştırması.
+				distColors := ColorsOfNetwork(net)
+				distCaps := ThroughputsForAssignment(net, distColors)
+				meanMbps := meanOfServed(distCaps, distColors, net)
+				edgeMbps := percentile(distCaps, 5)
+				dsaturCaps := ThroughputsForAssignment(net, DSATURAssignment(net))
+				dsaturMean := meanOfServed(dsaturCaps, DSATURAssignment(net), net)
+
+				// PoA (yalnızca budget verildiyse ve optimum kanıtlanırsa)
+				poa := math.NaN()
+				if optBudget > 0 {
+					opt := BruteForceOptimum(net, int(MaxColors), optBudget)
+					if opt.Exact && opt.Cost > eps {
+						poa = obj / opt.Cost
+						poaProven++
+					} else if opt.Exact {
+						poaProven++ // OPT=0 kanıtlandı ama PoA tanımsız
+					}
+				}
 
 				if converged {
 					convCount++
@@ -108,6 +133,10 @@ func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) err
 				dropSum += mst.Dropped
 				confSum += mst.Conflicts
 
+				poaStr := ""
+				if !math.IsNaN(poa) {
+					poaStr = fmt.Sprintf("%.4f", poa)
+				}
 				row := []string{
 					strconv.Itoa(k), strconv.Itoa(n), strconv.Itoa(r),
 					strconv.FormatInt(seed, 10),
@@ -121,6 +150,10 @@ func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) err
 					strconv.FormatInt(mst.Dropped, 10),
 					strconv.FormatInt(mst.Conflicts, 10),
 					strconv.FormatBool(obj < eps),
+					fmt.Sprintf("%.2f", meanMbps),
+					fmt.Sprintf("%.2f", edgeMbps),
+					fmt.Sprintf("%.2f", dsaturMean),
+					poaStr,
 				}
 				if err := w.Write(row); err != nil {
 					return err
@@ -128,10 +161,15 @@ func RunSweep(Ks, Ns []int, runsPerCell int, baseSeed int64, csvPath string) err
 			}
 			w.Flush()
 
-			fmt.Printf("K=%d N=%3d | conv %3d/%d | tur %6.1f ± %4.1f | NE %3d/%d | sıfır-girişim %3.0f%% | msg/bs %5.1f | drop %d | conflict %d\n",
+			poaInfo := ""
+			if optBudget > 0 {
+				poaInfo = fmt.Sprintf(" | PoA kanıt %d/%d", poaProven, runsPerCell)
+			}
+			fmt.Printf("K=%d N=%3d | conv %3d/%d | tur %6.1f ± %4.1f | NE %3d/%d | sıfır-girişim %3.0f%% | msg/bs %5.1f | conflict %d%s\n",
 				k, n, convCount, runsPerCell, mean(rounds), ci95Half(rounds),
 				neOK, runsPerCell, 100*float64(zeroCount)/float64(runsPerCell),
-				mean(msgAvg), dropSum, confSum)
+				mean(msgAvg), confSum, poaInfo)
+			_ = dropSum
 		}
 	}
 

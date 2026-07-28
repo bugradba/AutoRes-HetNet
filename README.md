@@ -118,7 +118,7 @@ go run .                           # Monte Carlo, 100 runs, mean ± 95% CI + bas
 go run . -runs 200 -optbudget 30s  # paper-grade main table (~20 min)
 
 # Convergence sweep (10x accelerated timers), then figures:
-go run . -sweep -runs 30 -timescale 0.1
+go run . -sweep -runs 30 -timescale 0.1 -optbudget 2s  # PoA için -optbudget ekleyin (küçük N)
 python plot_sweep.py sweep_results.csv sweep
 ```
 
