@@ -97,6 +97,9 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 		bs.ServingLOS = rng.Float64() < LOSProbabilityUMa(math.Max(userDist, 10.0))
 		bs.ServingShadowDB = rng.NormFloat64() * ShadowSigmaDB(bs.ServingLOS)
 
+		// A4 alpha hesabı, girişim linkleri (aşama 3) dolduktan SONRA
+		// ayrı bir döngüde yapılır (bs.Interferers'a ihtiyaç duyar).
+
 		// 3) Girişim linkleri (A2): yalnızca oyun komşuları değil,
 		//    girişim yarıçapı içindeki TÜM istasyonlar bu kullanıcıya
 		//    girişim yapabilir. Determinizm için j sırasıyla yinelenir.
@@ -116,7 +119,33 @@ func BuildNetwork(rng *rand.Rand, n int, areaSize, threshold float64, verbose bo
 		}
 	}
 
-	// --- AŞAMA 3: KENAR AĞIRLIKLARI ---
+	// --- A4: ADALET AĞIRLIKLARI (alpha) ---
+	// Girişim linkleri (bs.Interferers) dolduktan SONRA hesaplanır.
+	// alpha_i, istasyonun EN KÖTÜ DURUM SINR'ından (tüm komşuları
+	// eş-kanal olsaydı) türetilir: bu nicelik tahsisten bağımsızdır
+	// (komşu konumları ve donmuş kanal sabit), dolayısıyla ağırlıklı
+	// potansiyel oyun yapısını korur. Yüksek girişim maruziyetli
+	// (kurban adayı) istasyon alpha>1 alır; çakışmaları pahalılaşır.
+	if FairnessBeta > 0 {
+		for _, bs := range net {
+			potInterf := 0.0
+			for _, nid := range bs.Interferers {
+				other := net[int(nid)]
+				d := dist2D(other.X, other.Y, bs.UserX, bs.UserY)
+				potInterf += other.TxWatts * LinkGain(d, bs.InterfLOS[nid], bs.InterfShadowDB[nid], other.HeightM)
+			}
+			dServ := dist2D(bs.X, bs.Y, bs.UserX, bs.UserY)
+			sig := bs.TxWatts * LinkGain(dServ, bs.ServingLOS, bs.ServingShadowDB, bs.HeightM)
+			worstSINRdB := 10 * math.Log10(sig/(potInterf+NoisePowerWatts()))
+			bs.FairnessAlpha = math.Exp(FairnessBeta * (FairnessRefSINRdB - worstSINRdB) / 10.0)
+		}
+	} else {
+		for _, bs := range net {
+			bs.FairnessAlpha = 1.0
+		}
+	}
+
+	// --- AŞAMA 4: KENAR AĞIRLIKLARI ---
 	assignCouplingWeights(net, rng, verbose)
 	return net
 }
@@ -202,6 +231,13 @@ func assignCouplingWeights(net []*BaseStation, rng *rand.Rand, verbose bool) {
 				gainToItsUE := LinkGain(dToItsUE, other.InterfLOS[bs.ID], other.InterfShadowDB[bs.ID], bs.HeightM)
 
 				w = other.TxWatts*gainToMyUE + bs.TxWatts*gainToItsUE
+
+				// A4: adalet faktörü. Simetrik ½(alpha_i+alpha_j) çarpanı
+				// zayıf-sinyalli istasyonların çakışmalarını pahalılaştırır.
+				// Simetrik olduğu için (i↔j takasında değişmez) ağırlıklı
+				// potansiyel oyun yapısı ve yakınsama garantisi korunur.
+				// FairnessBeta=0 iken tüm alpha=1 → w değişmez.
+				w *= 0.5 * (bs.FairnessAlpha + other.FairnessAlpha)
 				detail = fmt.Sprintf("BS-BS: %.1fm | ->UE_i: %.1fm | ->UE_j: %.1fm",
 					Distance(bs, other), dToMyUE, dToItsUE)
 			}

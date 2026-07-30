@@ -70,6 +70,23 @@ const (
 // ayarlanır; 0 = homojen makro ağ (A3 öncesi davranış, ablasyon için).
 var PicoFraction = 0.5
 
+// --- A4: ADALET AYARI ---
+// FairnessBeta, adalet teriminin şiddetini kontrol eder:
+//
+//	0    : adalet kapalı, tüm alpha=1 (A4 öncesi davranış).
+//	>0   : zayıf-sinyalli istasyonlara üstel öncelik.
+//
+// alpha_i = exp(FairnessBeta · (SINR_ref - servingSINR_dB_i)/10)
+// yani servis SINR'ı referanstan düşük olan istasyon alpha>1 alır.
+// Beta arttıkça oyun hücre-kenarı korumasını toplam-verim pahasına
+// daha agresif önceler. -fairness-beta ile ayarlanır.
+var FairnessBeta = 0.0
+
+// FairnessRefSINRdB: alpha=1 veren referans servis SINR'ı (dB).
+// Bunun üstündeki istasyonlar alpha<1 (öncelik düşük), altındakiler
+// alpha>1 (öncelik yüksek) alır.
+const FairnessRefSINRdB = 15.0
+
 // --- A1: KUPLAJ MODU (oyunun maliyet fonksiyonu) ---
 //
 // physical  : w_ij = ½·Ptx·[G(j->UE_i) + G(i->UE_j)]  (varsayılan)
@@ -219,6 +236,17 @@ type BaseStation struct {
 	IsPico  bool
 	TxWatts float64 // bu istasyonun verici gücü (W)
 	HeightM float64 // bu istasyonun anten yüksekliği (m)
+
+	// --- A4: ADALET HASSASİYET AĞIRLIĞI ---
+	// FairnessAlpha, bu istasyonun girişimden korunma önceliğidir.
+	// Zayıf servis sinyali olan (hücre kenarı riski taşıyan) istasyonlara
+	// daha yüksek alpha verilir; oyun bu istasyonların çakışmalarını daha
+	// pahalı sayar ve onları korumaya öncelik verir. KRİTİK: alpha
+	// istasyonun KENDİ SABİT özelliğidir (servis SINR'ından türetilir,
+	// tahsisten bağımsız), bu yüzden ağırlıklı potansiyel oyun yapısı ve
+	// yakınsama garantisi korunur. Kenar ağırlığı simetrik kalır:
+	// w'_ij = ½(alpha_i + alpha_j)·w_ij.
+	FairnessAlpha float64
 
 	NeighborWeights map[Agent_ID]float64 // Ağırlıklı Girişim Grafiği
 	Inbox           chan Message

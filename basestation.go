@@ -12,19 +12,20 @@ import (
 
 func NewBaseStation(id Agent_ID, x, y float64) *BaseStation {
 	return &BaseStation{
-		ID:          id,
-		X:           x,
-		Y:           y,
-		IsPico:      false,                   // A3: varsayılan makro; BuildNetwork bazılarını piko yapar
-		TxWatts:     MacroTxWatts,            // 40 W
-		HeightM:     MacroHeightM,            // 25 m
-		Inbox:       make(chan Message, 100), //Bufer kanalı
-		Outbox:      make(map[Agent_ID]chan Message),
-		CurrentPRB:  -1,
-		Quit:        make(chan struct{}), // Stop() ile kapatılır; yaşam döngüsünü sonlandırır
-		State:       STATE_SENSING,
-		NeighborMap: make(map[Agent_ID]PRB),
-		ProposedPRB: -1,
+		ID:            id,
+		X:             x,
+		Y:             y,
+		IsPico:        false,                   // A3: varsayılan makro; BuildNetwork bazılarını piko yapar
+		TxWatts:       MacroTxWatts,            // 40 W
+		HeightM:       MacroHeightM,            // 25 m
+		FairnessAlpha: 1.0,                     // A4: adalet kapalı varsayılanı (w değişmez)
+		Inbox:         make(chan Message, 100), //Bufer kanalı
+		Outbox:        make(map[Agent_ID]chan Message),
+		CurrentPRB:    -1,
+		Quit:          make(chan struct{}), // Stop() ile kapatılır; yaşam döngüsünü sonlandırır
+		State:         STATE_SENSING,
+		NeighborMap:   make(map[Agent_ID]PRB),
+		ProposedPRB:   -1,
 
 		NeighborWeights: make(map[Agent_ID]float64), // Haritayı başlatmak için
 		InterfLOS:       make(map[Agent_ID]bool),    // G2: donmuş LOS/NLOS durumları

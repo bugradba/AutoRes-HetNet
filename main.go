@@ -27,6 +27,7 @@ func main() {
 	timescale := flag.Float64("timescale", 1.0, "tüm protokol zamanlayıcılarını ölçekler (0.1 = 10x hızlı; oranlar korunur)")
 	csvPath := flag.String("csv", "sweep_results.csv", "sweep ham veri çıktısı (koşu başına satır)")
 	ablate := flag.Bool("ablate-idpriority", false, "ABLASYON: WAITING-WAITING ID-öncelik itirazını kapat (H-1'in fiilî etkisini yeniden üretir; önce/sonra deneyi için)")
+	fairnessBeta := flag.Float64("fairness-beta", FairnessBeta, "A4: adalet şiddeti; 0 = kapalı, >0 zayıf-sinyalli (hücre kenarı) istasyonları korumaya önceler (ağırlıklı potansiyel oyun)")
 	picoFrac := flag.Float64("pico-fraction", PicoFraction, "HetNet: istasyonların piko (1 W/10 m) olma oranı; 0 = homojen makro ağ")
 	interfRadius := flag.Float64("interf-radius", InterfRadius, "fiziksel girişim yarıçapı (m); girişim bu yarıçap içindeki TÜM eş-kanal istasyonlardan toplanır (oyun eşiğinden bağımsız, A2)")
 	nStations := flag.Int("N", SimN, "istasyon sayısı (küçük N ör. 12, B&B optimumunu her koşuda kanıtlar => güvenilir PoA)")
@@ -46,6 +47,11 @@ func main() {
 		os.Exit(1)
 	}
 	PicoFraction = *picoFrac
+	if *fairnessBeta < 0 {
+		fmt.Println("HATA: -fairness-beta negatif olamaz")
+		os.Exit(1)
+	}
+	FairnessBeta = *fairnessBeta
 	if InterfRadius < SimThreshold {
 		fmt.Printf("UYARI: -interf-radius (%.0f m) oyun eşiğinden (%.0f m) küçük; girişim eksik toplanır.\n", InterfRadius, SimThreshold)
 	}
